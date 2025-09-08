@@ -29,8 +29,7 @@ public static class HTTPRestAPI
 
         if (!response.IsSuccessStatusCode)
         {
-            var content = response.Content.ReadAsByteArrayAsync();
-            var contentStr = Encoding.UTF8.GetString(content.Result);
+            var contentStr = await response.Content.ReadAsStringAsync();
             throw new Exception(contentStr);
         }
     }
@@ -50,8 +49,7 @@ public static class HTTPRestAPI
 
         if (!response.IsSuccessStatusCode)
         {
-            var content = response.Content.ReadAsByteArrayAsync();
-            var contentStr = Encoding.UTF8.GetString(content.Result);
+            var contentStr = await response.Content.ReadAsStringAsync();
             throw new Exception(contentStr);
         }
     }
