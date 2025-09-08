@@ -3,6 +3,7 @@ using System.Net;
 using System.Text;
 using Newtonsoft.Json.Linq;
 using WatsonWebserver.Core;
+using PurrCommon;
 using HttpMethod = System.Net.Http.HttpMethod;
 
 namespace PurrBalancer;

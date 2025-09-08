@@ -2,7 +2,7 @@
 using System.Net;
 using System.Text;
 using Newtonsoft.Json.Linq;
-using PurrBalancer;
+using PurrCommon;
 using WatsonWebserver.Core;
 using HttpMethod = System.Net.Http.HttpMethod;
 
@@ -35,7 +35,7 @@ public static class HTTPRestAPI
         }
     }
 
-    public static async Task unegisterRoom(string roomName)
+    public static async Task UnregisterRoom(string roomName)
     {
         if (!Env.TryGetValue("BALANCER_URL", out var balancerUrl))
             throw new Exception("Missing `BALANCER_URL` env variable");
