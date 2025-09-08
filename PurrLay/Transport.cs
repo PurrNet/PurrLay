@@ -150,7 +150,7 @@ public static class Transport
         }
     }
 
-    public static void OnClientLeft(PlayerInfo conn)
+    public static async Task OnClientLeft(PlayerInfo conn)
     {
         if (_clientToRoom.Remove(conn, out var roomId))
         {
@@ -166,7 +166,7 @@ public static class Transport
                         KickPlayer(list[i]);
                 }
 
-                Lobby.RemoveRoom(roomId);
+                await Lobby.RemoveRoom(roomId);
             }
             else if (_roomToClients.TryGetValue(roomId, out var list))
             {

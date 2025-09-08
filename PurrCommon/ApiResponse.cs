@@ -1,9 +1,9 @@
-﻿using System.Net;
+using System.Net;
 using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
-namespace PurrBalancer;
+namespace PurrCommon;
 
 public struct ApiResponse(byte[] data, HttpStatusCode status = HttpStatusCode.OK, string contentType = ContentType.JSON)
 {
