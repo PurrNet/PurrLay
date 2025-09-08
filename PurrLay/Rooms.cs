@@ -14,52 +14,74 @@ public static class Lobby
     static readonly Dictionary<string, Room> _room = new();
     static readonly Dictionary<ulong, string> _roomIdToName = new();
     static readonly object _roomsLock = new();
+    static readonly HashSet<string> _creatingRooms = new();
     
     static ulong _roomIdCounter;
 
     public static async Task<string> CreateRoom(string region, string name)
     {
+        // Guard against concurrent creates
         lock (_roomsLock)
         {
             if (_room.ContainsKey(name))
             {
                 if (Transport.TryGetRoomPlayerCount(_room[name].roomId, out var currentCount) && currentCount > 0)
                     throw new Exception("Room already exists");
+                
+                // Room exists but has no players - we can reuse it
+                var existing = _room[name];
+                existing.hostSecret = Guid.NewGuid().ToString().Replace("-", "");
+                existing.clientSecret = Guid.NewGuid().ToString().Replace("-", "");
+                existing.createdAt = DateTime.UtcNow;
+                return existing.hostSecret;
             }
+            
+            if (_creatingRooms.Contains(name))
+                throw new Exception("Room already exists");
+            _creatingRooms.Add(name);
         }
         
         var hostSecret = Guid.NewGuid().ToString().Replace("-", "");
-
-        if (_room.TryGetValue(name, out var existing))
+        var registered = false;
+        
+        try
         {
-            if (Transport.TryGetRoomPlayerCount(existing.roomId, out var currentCount) && currentCount > 0)
-                throw new Exception("Room already exists");
-
-            existing.hostSecret = hostSecret;
-            existing.clientSecret = Guid.NewGuid().ToString().Replace("-", "");
-            existing.createdAt = DateTime.UtcNow;
+            await HTTPRestAPI.RegisterRoom(region, name);
+            registered = true;
+            
+            Console.WriteLine($"Registered room {name}");
+            
+            lock (_roomsLock)
+            {
+                var newRoomId = _roomIdCounter++;
+                _roomIdToName.Add(newRoomId, name);
+                _room.Add(name, new Room
+                {
+                    name = name,
+                    hostSecret = hostSecret,
+                    clientSecret = Guid.NewGuid().ToString().Replace("-", ""),
+                    createdAt = DateTime.UtcNow,
+                    roomId = newRoomId
+                });
+                _creatingRooms.Remove(name);
+            }
+            
             return hostSecret;
         }
-
-        await HTTPRestAPI.RegisterRoom(region, name);
-
-        Console.WriteLine($"Registered room {name}");
-        
-        lock (_roomsLock)
+        catch
         {
-            var newRoomId = _roomIdCounter++;
-            _roomIdToName.Add(newRoomId, name);
-            _room.Add(name, new Room
+            // If we managed to register upstream but failed locally undo registration
+            if (registered)
             {
-                name = name,
-                hostSecret = hostSecret,
-                clientSecret = Guid.NewGuid().ToString().Replace("-", ""),
-                createdAt = DateTime.UtcNow,
-                roomId = newRoomId
-            });
+                try { await HTTPRestAPI.UnregisterRoom(name); }
+                catch (Exception e) { Console.Error.WriteLine($"Rollback unregister failed for '{name}': {e.Message}"); }
+            }
+            lock (_roomsLock)
+            {
+                _creatingRooms.Remove(name);
+            }
+            throw;
         }
-
-        return hostSecret;
     }
 
     public static bool TryGetRoom(string name, out Room? room)
