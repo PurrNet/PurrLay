@@ -47,14 +47,15 @@ public static class Lobby
         
         lock (_roomsLock)
         {
-            _roomIdToName.Add(_roomIdCounter, name);
+            var newRoomId = _roomIdCounter++;
+            _roomIdToName.Add(newRoomId, name);
             _room.Add(name, new Room
             {
                 name = name,
                 hostSecret = hostSecret,
                 clientSecret = Guid.NewGuid().ToString().Replace("-", ""),
                 createdAt = DateTime.UtcNow,
-                roomId = _roomIdCounter++
+                roomId = newRoomId
             });
         }
 
@@ -78,7 +79,7 @@ public static class Lobby
         }
     }
 
-    public static void RemoveRoom(ulong roomId)
+    public static async Task RemoveRoom(ulong roomId)
     {
         string? name;
         lock (_roomsLock)
@@ -87,13 +88,12 @@ public static class Lobby
                 return;
             _room.Remove(name);
         }
-        _ = UnregisterWithRetry(name!);
+        await UnregisterWithRetry(name!);
     }
 
-    static async Task UnregisterWithRetry(string name, int maxAttempts = 3)
+    static async Task UnregisterWithRetry(string name, int maxAttempts = 3, CancellationToken cancellationToken = default)
     {
-        int attempt = 0;
-        while (true)
+        for (var attempt = 1; attempt <= maxAttempts && !cancellationToken.IsCancellationRequested; attempt++)
         {
             try
             {
@@ -102,14 +102,14 @@ public static class Lobby
             }
             catch (Exception e)
             {
-                attempt++;
                 Console.Error.WriteLine($"UnregisterRoom attempt {attempt} failed for '{name}': {e.Message}");
-                if (attempt >= maxAttempts)
+                if (attempt == maxAttempts)
                 {
                     Console.Error.WriteLine($"UnregisterRoom giving up for '{name}' after {attempt} attempts.");
                     return;
                 }
-                await Task.Delay(TimeSpan.FromSeconds(Math.Min(5, attempt))); // simple backoff
+                var delayMs = Math.Min(5000, 250 * (1 << Math.Min(attempt - 1, 5)));
+                await Task.Delay(TimeSpan.FromMilliseconds(delayMs), cancellationToken);
             }
         }
     }
