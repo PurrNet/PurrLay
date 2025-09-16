@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  purrbalancer:
+    build:
+      context: .
+      dockerfile: PurrBalancer/dockerfile
+    container_name: purrbalancer
+    ports:
+      - "8080:8080"
+    environment:
+      - HOST=+
+      - PORT=8080
+      - SECRET=${SECRET:-PURRNET}
+    networks:
+      - purrnet
+
+  purrlay:
+    build:
+      context: .
+      dockerfile: PurrLay/dockerfile
+    container_name: purrlay
+    ports:
+      - "8081:8081"
+      - "7777:7777/udp"
+    environment:
+      - HOST=+
+      - PORT=8081
+      - SECRET=${SECRET:-PURRNET}
+      - BALANCER_URL=${BALANCER_URL:-http://purrbalancer:8080}
+      - HOST_SSL=${HOST_SSL:-false}
+      - HOST_REGION=${HOST_REGION:-default}
+      - HOST_DOMAIN=${HOST_DOMAIN:-localhost}
+    depends_on:
+      - purrbalancer
+    networks:
+      - purrnet
+
+networks:
+  purrnet:
+    driver: bridge

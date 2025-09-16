@@ -2,10 +2,23 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
-# Copy backend and frontend folders
-COPY . .
-RUN dotnet publish -c Release -o /app
+# Copy solution file and project files first for better caching
+COPY PurrLay.sln ./
+COPY PurrBalancer/PurrBalancer.csproj ./PurrBalancer/
+COPY PurrCommon/PurrCommon.csproj ./PurrCommon/
+COPY PurrLay/PurrLay.csproj ./PurrLay/
 
+# Restore dependencies
+RUN dotnet restore PurrLay/PurrLay.csproj
+
+# Copy all source code
+COPY PurrLay/ ./PurrLay/
+COPY PurrCommon/ ./PurrCommon/
+
+# Build and publish the PurrLay project
+RUN dotnet publish PurrLay/PurrLay.csproj -c Release -o /app --no-restore
+
+# Runtime stage
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
 WORKDIR /app
 COPY --from=build /app .

@@ -3,6 +3,7 @@ using System.Net;
 using System.Text;
 using Newtonsoft.Json.Linq;
 using WatsonWebserver.Core;
+using PurrCommon;
 using HttpMethod = System.Net.Http.HttpMethod;
 
 namespace PurrBalancer;
@@ -201,8 +202,7 @@ public static class HTTPRestAPI
 
         if (!resp.IsSuccessStatusCode)
         {
-            var content = resp.Content.ReadAsByteArrayAsync();
-            var contentStr = Encoding.UTF8.GetString(content.Result);
+            var contentStr = await resp.Content.ReadAsStringAsync();
             throw new Exception(contentStr);
         }
 
@@ -244,8 +244,7 @@ public static class HTTPRestAPI
 
         if (!r.IsSuccessStatusCode)
         {
-            var content = r.Content.ReadAsByteArrayAsync();
-            var contentStr = Encoding.UTF8.GetString(content.Result);
+            var contentStr = await r.Content.ReadAsStringAsync();
             throw new Exception(contentStr);
         }
 
