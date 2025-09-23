@@ -3,7 +3,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using JetBrains.Annotations;
 using Newtonsoft.Json;
-using PurrBalancer;
+using PurrCommon;
 using WatsonWebserver;
 using WatsonWebserver.Core;
 
@@ -63,25 +63,25 @@ internal static class Program
         {
             const int SECONDS_BETWEEN_REGISTRATION_ATTEMPTS = 30;
 
-            if (!Env.TryGetValue("BALANCER_URL", out var balancer) || balancer == null)
+            if (!Env.TryGetValue("BALANCER_URL", out var balancer) || string.IsNullOrEmpty(balancer))
             {
                 await Console.Error.WriteLineAsync("Missing `BALANCER_URL` env variable");
                 return;
             }
 
-            if (!Env.TryGetValue("HOST_SSL", out var ssl) || ssl == null)
+            if (!Env.TryGetValue("HOST_SSL", out var ssl) || string.IsNullOrEmpty(ssl))
             {
                 await Console.Error.WriteLineAsync("Missing `HOST_SSL` env variable");
                 return;
             }
 
-            if (!Env.TryGetValue("HOST_REGION", out var region)  || region == null)
+            if (!Env.TryGetValue("HOST_REGION", out var region)  || string.IsNullOrEmpty(region))
             {
                 await Console.Error.WriteLineAsync("Missing `HOST_REGION` env variable");
                 return;
             }
 
-            if (!Env.TryGetValue("HOST_DOMAIN", out var domain)  || domain == null)
+            if (!Env.TryGetValue("HOST_DOMAIN", out var domain)  || string.IsNullOrEmpty(domain))
             {
                 await Console.Error.WriteLineAsync("Missing `HOST_DOMAIN` env variable");
                 return;
@@ -133,22 +133,6 @@ internal static class Program
 
     static void Main(string[] args)
     {
-        string? certPath = null;
-        string? keyPath = null;
-
-        for (int i = 0; i < args.Length; i++)
-        {
-            switch (args[i])
-            {
-                case "--cert" when i + 1 < args.Length:
-                    certPath = args[++i];
-                    break;
-                case "--key" when i + 1 < args.Length:
-                    keyPath = args[++i];
-                    break;
-            }
-        }
-
         try
         {
             if (Env.TryGetValue("SECRET", out var secret) && secret != null)
@@ -167,13 +151,24 @@ internal static class Program
             settings.Headers.DefaultHeaders["Access-Control-Allow-Headers"] = "*";
             settings.Headers.DefaultHeaders["Access-Control-Allow-Credentials"] = "true";
 
-            if (certPath != null && keyPath != null)
+            // SSL configuration via .env only
+            if (Env.TryGetValue("SSL_CERT_PATH", out var certPath) &&
+                Env.TryGetValue("SSL_KEY_PATH", out var keyPath) &&
+                !string.IsNullOrWhiteSpace(certPath) &&
+                !string.IsNullOrWhiteSpace(keyPath))
             {
-                settings.Ssl = new WebserverSettings.SslSettings
+                try
                 {
-                    Enable = true,
-                    SslCertificate = X509Certificate2.CreateFromPemFile(certPath, keyPath)
-                };
+                    settings.Ssl = new WebserverSettings.SslSettings
+                    {
+                        Enable = true,
+                        SslCertificate = X509Certificate2.CreateFromPemFile(certPath!, keyPath!)
+                    };
+                }
+                catch (Exception e)
+                {
+                    Console.Error.WriteLine($"Failed to load SSL certificate from .env paths: {e.Message}");
+                }
             }
 
             new Webserver(settings, HandleRouting).Start();

@@ -1,0 +1,32 @@
+# Git and version control
+.git
+.gitignore
+.gitattributes
+
+# Build artifacts
+**/bin/
+**/obj/
+**/out/
+
+# IDE and editor files
+.vs/
+.vscode/
+*.suo
+*.user
+*.userprefs
+.DS_Store
+
+# Documentation and misc
+*.md
+README*
+LICENSE*
+
+# Docker files (except the ones we need)
+**/.dockerignore
+
+# Environment files with secrets
+**/.env.local
+**/.env.production
+
+# Logs
+**/*.log

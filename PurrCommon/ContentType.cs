@@ -1,4 +1,4 @@
-namespace PurrBalancer;
+namespace PurrCommon;
 
 public static class ContentType
 {
@@ -38,22 +38,15 @@ public static class ContentType
     public const string WEBMANIFEST = "application/manifest+json";
     public const string WASM = "application/wasm";
 
-    /// <summary>
-    /// Converts a file extension to its corresponding content type.
-    /// </summary>
-    /// <param name="extension">The file extension (e.g., ".css", ".js", ".png")</param>
-    /// <returns>The corresponding content type, or "application/octet-stream" if not found</returns>
     public static string FromExtension(string extension)
     {
         if (string.IsNullOrEmpty(extension))
             return "application/octet-stream";
 
-        // Remove the dot if present
         extension = extension.TrimStart('.').ToLowerInvariant();
 
         return extension switch
         {
-            // Text and Web
             "json" => JSON,
             "txt" => TEXT,
             "html" or "htm" => HTML,
@@ -87,7 +80,6 @@ public static class ContentType
             "pdf" => PDF,
             "zip" => ZIP,
 
-            // Default to binary
             _ => "application/octet-stream"
         };
     }
