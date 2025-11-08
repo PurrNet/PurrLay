@@ -11,6 +11,7 @@ public class WebSockets : IDisposable
 
     static readonly Dictionary<int, int> _localConnToGlobal = new();
     static readonly Dictionary<int, int> _globalConnToLocal = new();
+    static readonly object _wsConnLock = new();
 
     public int port { get; }
 
@@ -59,19 +60,25 @@ public class WebSockets : IDisposable
     private static void OnClientConnected(int conn)
     {
         var global = Transport.ReserveConnId(false);
-        _localConnToGlobal[conn] = global;
-        _globalConnToLocal[global] = conn;
+        lock (_wsConnLock)
+        {
+            _localConnToGlobal[conn] = global;
+            _globalConnToLocal[global] = conn;
+        }
     }
 
     private static void OnClientDisconnectedFromServer(int connId)
     {
         try
         {
-            if (_localConnToGlobal.Remove(connId, out var global))
+            int global;
+            lock (_wsConnLock)
             {
+                if (!_localConnToGlobal.Remove(connId, out global))
+                    return;
                 _globalConnToLocal.Remove(global);
-                Transport.OnClientLeft(new PlayerInfo(global, false));
             }
+            Transport.OnClientLeft(new PlayerInfo(global, false));
         }
         catch (Exception e)
         {
@@ -81,19 +88,27 @@ public class WebSockets : IDisposable
 
     public void KickClient(int connId)
     {
-        if (_globalConnToLocal.Remove(connId, out var localId))
+        int localId;
+        lock (_wsConnLock)
         {
+            if (!_globalConnToLocal.Remove(connId, out localId))
+                return;
             _localConnToGlobal.Remove(localId);
-            _server?.KickClient(localId);
         }
+        _server?.KickClient(localId);
     }
 
     private static void OnServerReceivedData(int connId, ArraySegment<byte> data)
     {
         try
         {
-            if (_localConnToGlobal.TryGetValue(connId, out var globalId))
-                Transport.OnServerReceivedData(new PlayerInfo(globalId, false), data);
+            int globalId;
+            lock (_wsConnLock)
+            {
+                if (!_localConnToGlobal.TryGetValue(connId, out globalId))
+                    return;
+            }
+            Transport.OnServerReceivedData(new PlayerInfo(globalId, false), data);
         }
         catch (Exception e)
         {
@@ -122,7 +137,12 @@ public class WebSockets : IDisposable
             return;
         }
 
-        if (_globalConnToLocal.TryGetValue(connId, out var localId))
-            _server?.SendOne(localId, segment);
+        int localId;
+        lock (_wsConnLock)
+        {
+            if (!_globalConnToLocal.TryGetValue(connId, out localId))
+                return;
+        }
+        _server?.SendOne(localId, segment);
     }
 }

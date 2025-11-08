@@ -12,6 +12,7 @@ public class UdpServer : INetLogger
 
     static readonly Dictionary<NetPeer, int> _localConnToGlobal = new();
     static readonly Dictionary<int, NetPeer> _globalConnToLocal = new();
+    static readonly object _udpConnLock = new();
 
     public UdpServer(int port)
     {
@@ -52,19 +53,25 @@ public class UdpServer : INetLogger
     {
         Console.WriteLine("Client connected to UDP");
         var global = Transport.ReserveConnId(true);
-        _localConnToGlobal[conn] = global;
-        _globalConnToLocal[global] = conn;
+        lock (_udpConnLock)
+        {
+            _localConnToGlobal[conn] = global;
+            _globalConnToLocal[global] = conn;
+        }
     }
 
     private static void OnServerDisconnected(NetPeer connId, DisconnectInfo disconnectinfo)
     {
         try
         {
-            if (_localConnToGlobal.Remove(connId, out var global))
+            int global;
+            lock (_udpConnLock)
             {
+                if (!_localConnToGlobal.Remove(connId, out global))
+                    return;
                 _globalConnToLocal.Remove(global);
-                Transport.OnClientLeft(new PlayerInfo(global, true));
             }
+            Transport.OnClientLeft(new PlayerInfo(global, true));
         }
         catch (Exception e)
         {
@@ -77,8 +84,13 @@ public class UdpServer : INetLogger
         try
         {
             var data = reader.GetRemainingBytesSegment();
-            if (_localConnToGlobal.TryGetValue(connId, out var globalId))
-                Transport.OnServerReceivedData(new PlayerInfo(globalId, true), data);
+            int globalId;
+            lock (_udpConnLock)
+            {
+                if (!_localConnToGlobal.TryGetValue(connId, out globalId))
+                    return;
+            }
+            Transport.OnServerReceivedData(new PlayerInfo(globalId, true), data);
         }
         catch (Exception e)
         {
@@ -93,16 +105,24 @@ public class UdpServer : INetLogger
 
     public void KickClient(int playerConnId)
     {
-        if (_globalConnToLocal.Remove(playerConnId, out var peer))
+        NetPeer? peer;
+        lock (_udpConnLock)
         {
+            if (!_globalConnToLocal.Remove(playerConnId, out peer))
+                return;
             _localConnToGlobal.Remove(peer);
-            _server.DisconnectPeer(peer);
         }
+        _server.DisconnectPeer(peer);
     }
 
     public void SendOne(int valueConnId, ReadOnlySpan<byte> segment, DeliveryMethod method)
     {
-        if (_globalConnToLocal.TryGetValue(valueConnId, out var peer))
-            peer.Send(segment, method);
+        NetPeer? peer;
+        lock (_udpConnLock)
+        {
+            if (!_globalConnToLocal.TryGetValue(valueConnId, out peer))
+                return;
+        }
+        peer.Send(segment, method);
     }
 }

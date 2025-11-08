@@ -177,6 +177,10 @@ internal static class Program
             }
 
             new Webserver(settings, HandleRouting).Start();
+            
+            // Start empty room cleanup task
+            _ = Lobby.StartEmptyRoomCleanupTask();
+            
             Thread.Sleep(Timeout.Infinite);
         }
         catch (Exception e)

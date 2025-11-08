@@ -108,6 +108,8 @@ public static class HTTPRestAPI
     }
 
     static readonly Dictionary<string, string> _roomToRegion = new();
+    private static readonly object _roomToRegionLock = new();
+    private static readonly object _roomsLock = new();
 
     private static readonly List<RoomInfo> _rooms = new();
 
@@ -141,6 +143,8 @@ public static class HTTPRestAPI
                 return await AllocateRoom(req);
             case "/list":
                 return await SearchRooms(req);
+            case "/getTotalConnections":
+                return GetTotalConnections(req);
             default:
                 return new ApiResponse(HttpStatusCode.NotFound);
         }
@@ -162,14 +166,16 @@ public static class HTTPRestAPI
         var response = new JObject();
         var servers = new JArray();
 
-        for (int i = startIdx; i < _rooms.Count; ++i)
+        lock (_roomsLock)
         {
-            servers.Add(JObject.FromObject(_rooms[i]));
+            for (int i = startIdx; i < _rooms.Count; ++i)
+            {
+                servers.Add(JObject.FromObject(_rooms[i]));
+            }
+
+            response.Add("results", servers);
+            response.Add("total", _rooms.Count);
         }
-
-        response.Add("results", servers);
-        response.Add("total", _rooms.Count);
-
         return Task.FromResult(new ApiResponse(response));
     }
 
@@ -227,8 +233,12 @@ public static class HTTPRestAPI
         if (string.IsNullOrEmpty(name))
             throw new Exception("PurrBalancer_join: Invalid headers");
 
-        if (!_roomToRegion.TryGetValue(name, out var region))
-            throw new Exception("PurrBalancer: Room not found");
+        string region;
+        lock (_roomToRegionLock)
+        {
+            if (!_roomToRegion.TryGetValue(name, out region))
+                throw new Exception("PurrBalancer: Room not found");
+        }
 
         if (!TryGetServer(region, out var server))
             throw new Exception("PurrBalancer: Invalid region");
@@ -273,15 +283,21 @@ public static class HTTPRestAPI
         if (!string.Equals(internalSecret, Program.SECRET_INTERNAL))
             throw new Exception("PurrBalancer: Invalid internal secret");
 
-        if (!_roomToRegion.Remove(name, out _))
-            throw new Exception("PurrBalancer: Room not found");
-
-        for (var i = 0; i < _rooms.Count; i++)
+        lock (_roomToRegionLock)
         {
-            if (_rooms[i].name == name)
+            if (!_roomToRegion.Remove(name, out _))
+                throw new Exception("PurrBalancer: Room not found");
+        }
+
+        lock (_roomsLock)
+        {
+            for (var i = 0; i < _rooms.Count; i++)
             {
-                _rooms.RemoveAt(i);
-                break;
+                if (_rooms[i].name == name)
+                {
+                    _rooms.RemoveAt(i);
+                    break;
+                }
             }
         }
 
@@ -303,20 +319,26 @@ public static class HTTPRestAPI
         if (!string.Equals(internalSecret, Program.SECRET_INTERNAL))
             throw new Exception("PurrBalancer: Invalid internal secret");
 
-        if (!_roomToRegion.ContainsKey(name))
-            throw new Exception("PurrBalancer: Room not found");
-
         if (!int.TryParse(count, out var countNumber))
             throw new Exception("PurrBalancer: Invalid count");
 
-        for (var i = 0; i < _rooms.Count; i++)
+        lock (_roomToRegionLock)
         {
-            var room = _rooms[i];
-            if (room.name == name)
+            if (!_roomToRegion.ContainsKey(name))
+                throw new Exception("PurrBalancer: Room not found");
+        }
+
+        lock (_roomsLock)
+        {
+            for (var i = 0; i < _rooms.Count; i++)
             {
-                room.connectedPlayers = countNumber;
-                _rooms[i] = room;
-                break;
+                var room = _rooms[i];
+                if (room.name == name)
+                {
+                    room.connectedPlayers = countNumber;
+                    _rooms[i] = room;
+                    break;
+                }
             }
         }
 
@@ -341,15 +363,21 @@ public static class HTTPRestAPI
         if (!TryGetServer(region, out _))
             throw new Exception("PurrBalancer: Invalid region when registering room");
 
-        if (!_roomToRegion.TryAdd(name, region))
-            throw new Exception("PurrBalancer: Room already registered");
-
-        _rooms.Add(new RoomInfo
+        lock (_roomToRegionLock)
         {
-            name = name,
-            region = region,
-            connectedPlayers = 0
-        });
+            if (!_roomToRegion.TryAdd(name, region))
+                throw new Exception("PurrBalancer: Room already registered");
+        }
+
+        lock (_roomsLock)
+        {
+            _rooms.Add(new RoomInfo
+            {
+                name = name,
+                region = region,
+                connectedPlayers = 0
+            });
+        }
 
         return new ApiResponse(new JObject
         {
@@ -418,5 +446,23 @@ public static class HTTPRestAPI
         {
             ["status"] = "ok"
         });
+    }
+
+    private static ApiResponse GetTotalConnections(HttpRequestBase req)
+    {
+        int totalConnections = 0;
+        
+        lock (_roomsLock)
+        {
+            for (var i = 0; i < _rooms.Count; i++)
+            {
+                totalConnections += _rooms[i].connectedPlayers;
+            }
+        }
+        
+        return new ApiResponse(JObject.FromObject(new
+        {
+            totalConnections = totalConnections
+        }));
     }
 }

@@ -100,6 +100,7 @@ public static class HTTPRestAPI
             case "/ping": return new ApiResponse(HttpStatusCode.OK);
             case "/getJoinDetails": return GetJoinDetails(req);
             case "/allocate_ws": return await AllocateWebSockets(req);
+            case "/getTotalConnections": return GetTotalConnections(req);
             default:
                 return new ApiResponse(HttpStatusCode.NotFound);
         }
@@ -160,6 +161,16 @@ public static class HTTPRestAPI
             port = webServer.port,
             secret = room.clientSecret,
             udpPort = Program.UDP_PORT
+        }));
+    }
+
+    private static ApiResponse GetTotalConnections(HttpRequestBase req)
+    {
+        var totalConnections = Transport.GetTotalConnectionCount();
+        
+        return new ApiResponse(JObject.FromObject(new
+        {
+            totalConnections = totalConnections
         }));
     }
 }

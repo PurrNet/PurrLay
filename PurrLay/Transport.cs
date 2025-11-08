@@ -1,4 +1,5 @@
 ﻿using System.Text;
+using System.Threading;
 using LiteNetLib;
 using LiteNetLib.Utils;
 using Newtonsoft.Json;
@@ -11,6 +12,7 @@ public static class Transport
     static readonly Dictionary<ulong, List<PlayerInfo>> _roomToClients = new();
     static readonly Dictionary<ulong, PlayerInfo> _roomToHost = new();
     static readonly Dictionary<int, bool> _connToUDP = new();
+    static readonly object _transportLock = new();
 
     static readonly NetDataWriter _writer = new();
     private static int _nextConnId;
@@ -18,13 +20,27 @@ public static class Transport
     public static bool TryGetRoomPlayerCount(ulong roomId, out int count)
     {
         count = default;
-        return _roomToClients.TryGetValue(roomId, out var list) && (count = list.Count) > 0;
+        lock (_transportLock)
+        {
+            return _roomToClients.TryGetValue(roomId, out var list) && (count = list.Count) > 0;
+        }
+    }
+
+    public static int GetTotalConnectionCount()
+    {
+        lock (_transportLock)
+        {
+            return _clientToRoom.Count;
+        }
     }
 
     public static int ReserveConnId(bool isUdp)
     {
-        var connId = _nextConnId++;
-        _connToUDP[connId] = isUdp;
+        var connId = Interlocked.Increment(ref _nextConnId) - 1;
+        lock (_transportLock)
+        {
+            _connToUDP[connId] = isUdp;
+        }
         return connId;
     }
 
@@ -37,8 +53,12 @@ public static class Transport
 
     static void SendClientsDisconnected(ulong roomId, PlayerInfo player)
     {
-        if (!_roomToHost.TryGetValue(roomId, out var host))
-            return;
+        PlayerInfo host;
+        lock (_transportLock)
+        {
+            if (!_roomToHost.TryGetValue(roomId, out host))
+                return;
+        }
 
         _writer.Reset();
         _writer.Put((byte)SERVER_PACKET_TYPE.SERVER_CLIENT_DISCONNECTED);
@@ -56,7 +76,11 @@ public static class Transport
         if (data.Array == null)
             return;
 
-        bool authenticated = _clientToRoom.ContainsKey(sender);
+        bool authenticated;
+        lock (_transportLock)
+        {
+            authenticated = _clientToRoom.ContainsKey(sender);
+        }
 
         if (!authenticated)
         {
@@ -64,11 +88,16 @@ public static class Transport
             return;
         }
 
-        if (!_clientToRoom.TryGetValue(sender, out var roomId))
-            return;
+        ulong roomId;
+        PlayerInfo hostId;
+        lock (_transportLock)
+        {
+            if (!_clientToRoom.TryGetValue(sender, out roomId))
+                return;
 
-        if (!_roomToHost.TryGetValue(roomId, out var hostId))
-            return;
+            if (!_roomToHost.TryGetValue(roomId, out hostId))
+                return;
+        }
 
         if (hostId == sender)
         {
@@ -91,34 +120,41 @@ public static class Transport
                                  subData.Array[subData.Offset + 2] << 16 |
                                  subData.Array[subData.Offset + 3] << 24;
 
-                    if (!_connToUDP.TryGetValue(target, out var isUDP))
+                    bool isUDP;
+                    bool isValidTarget;
+                    lock (_transportLock)
+                    {
+                        if (!_connToUDP.TryGetValue(target, out isUDP))
+                            break;
+
+                        isValidTarget = _clientToRoom.TryGetValue(new PlayerInfo(target, isUDP), out var room) && room == roomId;
+                    }
+
+                    if (!isValidTarget)
                         break;
 
-                    if (_clientToRoom.TryGetValue(new PlayerInfo(target, isUDP), out var room) && room == roomId)
+                    ArraySegment<byte> rawData;
+                    var method = DeliveryMethod.ReliableOrdered;
+
+                    if (sender.isUdp)
                     {
-                        ArraySegment<byte> rawData;
-                        var method = DeliveryMethod.ReliableOrdered;
+                        rawData = new ArraySegment<byte>(
+                            subData.Array, subData.Offset + metdataLength + 1, subData.Count - metdataLength - 1);
+                        method = (DeliveryMethod)subData.Array[subData.Offset + 4];
+                    }
+                    else
+                    {
+                        rawData = new ArraySegment<byte>(
+                            subData.Array, subData.Offset + metdataLength, subData.Count - metdataLength);
+                    }
 
-                        if (sender.isUdp)
-                        {
-                            rawData = new ArraySegment<byte>(
-                                subData.Array, subData.Offset + metdataLength + 1, subData.Count - metdataLength - 1);
-                            method = (DeliveryMethod)subData.Array[subData.Offset + 4];
-                        }
-                        else
-                        {
-                            rawData = new ArraySegment<byte>(
-                                subData.Array, subData.Offset + metdataLength, subData.Count - metdataLength);
-                        }
-
-                        if (isUDP)
-                        {
-                            HTTPRestAPI.udpServer?.SendOne(target, rawData, method);
-                        }
-                        else
-                        {
-                            HTTPRestAPI.webServer?.SendOne(target, rawData);
-                        }
+                    if (isUDP)
+                    {
+                        HTTPRestAPI.udpServer?.SendOne(target, rawData, method);
+                    }
+                    else
+                    {
+                        HTTPRestAPI.webServer?.SendOne(target, rawData);
                     }
                     break;
                 }
@@ -127,58 +163,96 @@ public static class Transport
         else
         {
             // Client
-            if (_roomToHost.TryGetValue(roomId, out var host))
+            PlayerInfo host;
+            lock (_transportLock)
             {
-                if (data.Count <= 1)
+                if (!_roomToHost.TryGetValue(roomId, out host))
                     return;
+            }
 
-                _writer.Reset();
+            if (data.Count <= 1)
+                return;
 
-                var connId = sender.connId;
+            _writer.Reset();
 
-                _writer.Put((byte)SERVER_PACKET_TYPE.SERVER_CLIENT_DATA);
-                _writer.Put(connId);
+            var connId = sender.connId;
 
-                if (sender.isUdp)
-                     _writer.Put(data.Array, data.Offset + 1, data.Count - 1);
-                else _writer.Put(data.Array, data.Offset, data.Count);
+            _writer.Put((byte)SERVER_PACKET_TYPE.SERVER_CLIENT_DATA);
+            _writer.Put(connId);
 
-                if (host.isUdp)
-                {
-                    var method = sender.isUdp ? (DeliveryMethod)data[0] : DeliveryMethod.ReliableOrdered;
-                    HTTPRestAPI.udpServer?.SendOne(host.connId, _writer.AsReadOnlySpan(), method);
-                }
-                else
-                {
-                    HTTPRestAPI.webServer?.SendOne(host.connId, _writer.AsReadOnlySpan());
-                }
+            if (sender.isUdp)
+                 _writer.Put(data.Array, data.Offset + 1, data.Count - 1);
+            else _writer.Put(data.Array, data.Offset, data.Count);
+
+            var segment = _writer.AsReadOnlySpan();
+
+            if (host.isUdp)
+            {
+                var method = sender.isUdp ? (DeliveryMethod)data[0] : DeliveryMethod.ReliableOrdered;
+                HTTPRestAPI.udpServer?.SendOne(host.connId, segment, method);
+            }
+            else
+            {
+                HTTPRestAPI.webServer?.SendOne(host.connId, segment);
             }
         }
     }
 
     public static void OnClientLeft(PlayerInfo conn)
     {
-        if (_clientToRoom.Remove(conn, out var roomId))
+        ulong roomId;
+        bool isHost = false;
+        List<PlayerInfo>? clientsList = null;
+
+        lock (_transportLock)
         {
+            if (!_clientToRoom.Remove(conn, out roomId))
+                return;
+
             if (_roomToHost.TryGetValue(roomId, out var hostId) && hostId.Equals(conn))
             {
                 // Remove room host
                 _roomToHost.Remove(roomId);
+                isHost = true;
 
-                // Kick all clients and remove room
-                if (_roomToClients.Remove(roomId, out var list))
+                // Get clients list before removing
+                if (_roomToClients.Remove(roomId, out clientsList))
                 {
-                    for (var i = 0; i < list.Count; i++)
-                        KickPlayer(list[i]);
+                    // Make a copy to avoid holding lock while kicking
+                    clientsList = new List<PlayerInfo>(clientsList);
                 }
-
-                Lobby.RemoveRoom(roomId);
             }
-            else if (_roomToClients.TryGetValue(roomId, out var list))
+            else if (_roomToClients.TryGetValue(roomId, out clientsList))
             {
-                SendClientsDisconnected(roomId, conn);
-                list.Remove(conn);
-                Lobby.UpdateRoomPlayerCount(roomId, list.Count);
+                // Make a copy of the list reference, we'll modify it outside the lock
+                // Actually, we need to remove from the list, so we'll do it carefully
+            }
+        }
+
+        if (isHost)
+        {
+            // Kick all clients and remove room
+            if (clientsList != null)
+            {
+                for (var i = 0; i < clientsList.Count; i++)
+                    KickPlayer(clientsList[i]);
+            }
+
+            Lobby.RemoveRoom(roomId);
+        }
+        else if (clientsList != null)
+        {
+            // Remove client from list
+            lock (_transportLock)
+            {
+                if (_roomToClients.TryGetValue(roomId, out var list))
+                {
+                    list.Remove(conn);
+                    var count = list.Count;
+                    // Release lock before calling external method
+                    SendClientsDisconnected(roomId, conn);
+                    Lobby.UpdateRoomPlayerCount(roomId, count);
+                }
             }
         }
     }
@@ -204,35 +278,45 @@ public static class Transport
             }
 
             bool isHost = false;
+            List<PlayerInfo>? existingClients = null;
 
-            if (room.clientSecret == auth.clientSecret)
+            lock (_transportLock)
             {
-                _clientToRoom.Add(player, room.roomId);
-            }
-            else if (room.hostSecret == auth.clientSecret)
-            {
-                _clientToRoom.Add(player, room.roomId);
-                _roomToHost.Add(room.roomId, player);
-                isHost = true;
-            }
-            else
-            {
-                SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED);
-                return;
+                if (room.clientSecret == auth.clientSecret)
+                {
+                    _clientToRoom.Add(player, room.roomId);
+                }
+                else if (room.hostSecret == auth.clientSecret)
+                {
+                    _clientToRoom.Add(player, room.roomId);
+                    _roomToHost.Add(room.roomId, player);
+                    isHost = true;
+                }
+                else
+                {
+                    SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED);
+                    return;
+                }
+
+                if (!_roomToClients.TryGetValue(room.roomId, out var list))
+                {
+                    _roomToClients.Add(room.roomId, [player]);
+                    Lobby.UpdateRoomPlayerCount(room.roomId, 1);
+                }
+                else
+                {
+                    existingClients = list;
+                    list.Add(player);
+                    Lobby.UpdateRoomPlayerCount(room.roomId, list.Count);
+                }
             }
 
-            if (!_roomToClients.TryGetValue(room.roomId, out var list))
-            {
-                _roomToClients.Add(room.roomId, [player]);
-                Lobby.UpdateRoomPlayerCount(room.roomId, 1);
-            }
-            else
+            // Send notifications outside the lock
+            if (existingClients != null)
             {
                 if (isHost)
-                     SendClientsConnected(room.roomId, list);
+                     SendClientsConnected(room.roomId, existingClients);
                 else SendClientsConnected(room.roomId, player);
-                list.Add(player);
-                Lobby.UpdateRoomPlayerCount(room.roomId, list.Count);
             }
 
             SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATED);
@@ -257,8 +341,12 @@ public static class Transport
 
     static void SendClientsConnected(ulong roomId, List<PlayerInfo> connected)
     {
-        if (!_roomToHost.TryGetValue(roomId, out var connId))
-            return;
+        PlayerInfo connId;
+        lock (_transportLock)
+        {
+            if (!_roomToHost.TryGetValue(roomId, out connId))
+                return;
+        }
 
         _writer.Reset();
         _writer.Put((byte)SERVER_PACKET_TYPE.SERVER_CLIENT_CONNECTED);
@@ -269,22 +357,28 @@ public static class Transport
             _writer.Put(player.connId);
         }
 
+        var segment = _writer.AsReadOnlySpan();
         if (connId.isUdp)
-             HTTPRestAPI.udpServer?.SendOne(connId.connId, _writer.AsReadOnlySpan(), DeliveryMethod.ReliableOrdered);
-        else HTTPRestAPI.webServer?.SendOne(connId.connId, _writer.AsReadOnlySpan());
+             HTTPRestAPI.udpServer?.SendOne(connId.connId, segment, DeliveryMethod.ReliableOrdered);
+        else HTTPRestAPI.webServer?.SendOne(connId.connId, segment);
     }
 
     static void SendClientsConnected(ulong roomId, PlayerInfo connected)
     {
-        if (!_roomToHost.TryGetValue(roomId, out var connId))
-            return;
+        PlayerInfo connId;
+        lock (_transportLock)
+        {
+            if (!_roomToHost.TryGetValue(roomId, out connId))
+                return;
+        }
 
         _writer.Reset();
         _writer.Put((byte)SERVER_PACKET_TYPE.SERVER_CLIENT_CONNECTED);
         _writer.Put(connected.connId);
 
+        var segment = _writer.AsReadOnlySpan();
         if (connId.isUdp)
-            HTTPRestAPI.udpServer?.SendOne(connId.connId, _writer.AsReadOnlySpan(), DeliveryMethod.ReliableOrdered);
-        else HTTPRestAPI.webServer?.SendOne(connId.connId, _writer.AsReadOnlySpan());
+            HTTPRestAPI.udpServer?.SendOne(connId.connId, segment, DeliveryMethod.ReliableOrdered);
+        else HTTPRestAPI.webServer?.SendOne(connId.connId, segment);
     }
 }
