@@ -190,24 +190,8 @@ public static class Transport
                     if (!isValidTarget)
                         break;
 
-                    // Remove player from room and kick them
-                    int playerCount = 0;
-                    lock (_transportLock)
-                    {
-                        if (!_clientToRoom.Remove(targetPlayer, out _))
-                            break;
-
-                        if (_roomToClients.TryGetValue(roomId, out var list))
-                        {
-                            list.Remove(targetPlayer);
-                            playerCount = list.Count;
-                        }
-                    }
-
                     // Release lock before calling external methods
                     KickPlayer(targetPlayer);
-                    // SendClientsDisconnected(roomId, targetPlayer);
-                    // Lobby.UpdateRoomPlayerCount(roomId, playerCount);
                     break;
                 }
             }
