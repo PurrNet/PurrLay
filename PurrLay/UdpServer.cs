@@ -23,7 +23,8 @@ public class UdpServer : INetLogger
         {
             UnconnectedMessagesEnabled = true,
             PingInterval = 900,
-            UnsyncedEvents = true
+            UnsyncedEvents = true,
+            DisconnectTimeout = 20000
         };
 
         _serverListener.ConnectionRequestEvent += OnServerConnectionRequest;
