@@ -1,5 +1,4 @@
 ﻿using System.Text;
-using System.Threading;
 using LiteNetLib;
 using LiteNetLib.Utils;
 using Newtonsoft.Json;
@@ -158,6 +157,59 @@ public static class Transport
                     }
                     break;
                 }
+                case HOST_PACKET_TYPE.KICK_PLAYER:
+                {
+                    if (subData.Count < sizeof(int))
+                        break;
+
+                    int target = subData.Array[subData.Offset + 0] |
+                                 subData.Array[subData.Offset + 1] << 8 |
+                                 subData.Array[subData.Offset + 2] << 16 |
+                                 subData.Array[subData.Offset + 3] << 24;
+
+                    PlayerInfo targetPlayer;
+                    bool isValidTarget = false;
+                    lock (_transportLock)
+                    {
+                        if (!_connToUDP.TryGetValue(target, out var isUDP))
+                            break;
+
+                        targetPlayer = new PlayerInfo(target, isUDP);
+                        
+                        // Verify target is in the same room
+                        if (!_clientToRoom.TryGetValue(targetPlayer, out var targetRoomId) || targetRoomId != roomId)
+                            break;
+
+                        // Verify target is not the host (host can't kick themselves)
+                        if (_roomToHost.TryGetValue(roomId, out var host) && host.Equals(targetPlayer))
+                            break;
+
+                        isValidTarget = true;
+                    }
+
+                    if (!isValidTarget)
+                        break;
+
+                    // Remove player from room and kick them
+                    int playerCount = 0;
+                    lock (_transportLock)
+                    {
+                        if (!_clientToRoom.Remove(targetPlayer, out _))
+                            break;
+
+                        if (_roomToClients.TryGetValue(roomId, out var list))
+                        {
+                            list.Remove(targetPlayer);
+                            playerCount = list.Count;
+                        }
+                    }
+
+                    // Release lock before calling external methods
+                    KickPlayer(targetPlayer);
+                    // SendClientsDisconnected(roomId, targetPlayer);
+                    // Lobby.UpdateRoomPlayerCount(roomId, playerCount);
+                    break;
+                }
             }
         }
         else
@@ -202,7 +254,7 @@ public static class Transport
     {
         ulong roomId;
         bool isHost = false;
-        List<PlayerInfo>? clientsList = null;
+        List<PlayerInfo>? clientsList;
 
         lock (_transportLock)
         {
