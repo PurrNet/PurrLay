@@ -143,7 +143,8 @@ public class UdpServer : INetLogger
                 peer.Send(segment, DeliveryMethod.ReliableOrdered);
                 return;
             }
-            else Console.Error.WriteLine($"Error sending data: Cannot send {segment.Length} bytes over {method} UDP, MTU is {mtu}");
+
+            Console.Error.WriteLine($"Error sending data: Cannot send {segment.Length} bytes over {method} UDP, MTU is {mtu}");
         }
 
         try
