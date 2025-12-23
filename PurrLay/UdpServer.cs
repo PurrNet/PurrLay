@@ -141,6 +141,7 @@ public class UdpServer : INetLogger
             {
                 Console.WriteLine($"Warning: Sending {segment.Length} bytes over {method} UDP, MTU is {mtu}; upgrading to ReliableOrdered");
                 peer.Send(segment, DeliveryMethod.ReliableOrdered);
+                return;
             }
             else Console.Error.WriteLine($"Error sending data: Cannot send {segment.Length} bytes over {method} UDP, MTU is {mtu}");
         }
