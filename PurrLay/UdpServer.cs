@@ -144,6 +144,7 @@ public class UdpServer : INetLogger
                 return;
             }
 
+            // if we are not reliable, just drop the packet
             Console.Error.WriteLine($"Error sending data: Cannot send {segment.Length} bytes over {method} UDP, MTU is {mtu}");
         }
 
