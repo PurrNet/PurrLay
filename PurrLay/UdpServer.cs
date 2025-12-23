@@ -124,6 +124,34 @@ public class UdpServer : INetLogger
             if (!_globalConnToLocal.TryGetValue(valueConnId, out peer))
                 return;
         }
-        peer.Send(segment, method);
+
+        var mtu = peer.GetMaxSinglePacketSize(method);
+
+        bool isReliable =
+            method is DeliveryMethod.ReliableOrdered
+                or DeliveryMethod.ReliableUnordered
+                or DeliveryMethod.ReliableSequenced;
+
+        bool requiresSinglePacket = method != DeliveryMethod.ReliableUnordered && method != DeliveryMethod.ReliableOrdered;
+        bool isSplit = segment.Length > mtu;
+
+        if (requiresSinglePacket && isSplit)
+        {
+            if (isReliable)
+            {
+                Console.WriteLine($"Warning: Sending {segment.Length} bytes over {method} UDP, MTU is {mtu}; upgrading to ReliableOrdered");
+                peer.Send(segment, DeliveryMethod.ReliableOrdered);
+            }
+            else Console.Error.WriteLine($"Error sending data: Cannot send {segment.Length} bytes over {method} UDP, MTU is {mtu}");
+        }
+
+        try
+        {
+            peer.Send(segment, method);
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"Error sending data: {e.Message}\n{e.StackTrace}");
+        }
     }
 }

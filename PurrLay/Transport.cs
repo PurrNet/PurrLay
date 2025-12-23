@@ -175,7 +175,7 @@ public static class Transport
                             break;
 
                         targetPlayer = new PlayerInfo(target, isUDP);
-                        
+
                         // Verify target is in the same room
                         if (!_clientToRoom.TryGetValue(targetPlayer, out var targetRoomId) || targetRoomId != roomId)
                             break;
