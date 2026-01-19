@@ -300,6 +300,7 @@ public static class Transport
             if (data.Array == null)
             {
                 SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED);
+                Console.Error.WriteLine("Authentication failed: data is null");
                 return;
             }
 
@@ -310,6 +311,7 @@ public static class Transport
                 !Lobby.TryGetRoom(auth.roomName, out var room) || room == null)
             {
                 SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED);
+                Console.Error.WriteLine("Authentication failed: invalid room or secrets");
                 return;
             }
 
@@ -331,6 +333,7 @@ public static class Transport
                 else
                 {
                     SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED);
+                    Console.Error.WriteLine("Authentication failed: secrets do not match");
                     return;
                 }
 
@@ -357,9 +360,10 @@ public static class Transport
 
             SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATED);
         }
-        catch
+        catch(Exception e)
         {
             SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED);
+            Console.Error.WriteLine($"Authentication failed (exception): {e.Message}\n{e.StackTrace}");
         }
     }
 
