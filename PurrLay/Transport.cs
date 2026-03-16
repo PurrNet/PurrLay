@@ -75,6 +75,13 @@ public static class Transport
         if (data.Array == null)
             return;
 
+        // Pipe clients are routed separately — no rooms, no host
+        if (PipeRelay.IsClient(sender.connId))
+        {
+            PipeRelay.OnData(sender, data);
+            return;
+        }
+
         bool authenticated;
         lock (_transportLock)
         {
@@ -168,7 +175,7 @@ public static class Transport
                                  subData.Array[subData.Offset + 3] << 24;
 
                     PlayerInfo targetPlayer;
-                    bool isValidTarget = false;
+                    bool isValidTarget;
                     lock (_transportLock)
                     {
                         if (!_connToUDP.TryGetValue(target, out var isUDP))
@@ -236,6 +243,10 @@ public static class Transport
 
     public static void OnClientLeft(PlayerInfo conn)
     {
+        // Pipe clients are tracked separately
+        if (PipeRelay.RemoveClient(conn.connId))
+            return;
+
         ulong roomId;
         bool isHost = false;
         List<PlayerInfo>? clientsList;
@@ -306,6 +317,22 @@ public static class Transport
 
             var str = Encoding.UTF8.GetString(data.Array, data.Offset, data.Count);
             var auth = JsonConvert.DeserializeObject<ClientAuthenticate>(str);
+
+            // Pipe connections — no room, no host, just forwarding
+            if (auth.pipe)
+            {
+                PipeRelay.AddClient(player);
+
+                _writer.Reset();
+                _writer.Put((byte)SERVER_PACKET_TYPE.SERVER_PIPE_AUTHENTICATED);
+                _writer.Put(player.connId);
+
+                var segment = _writer.AsReadOnlySpan();
+                if (player.isUdp)
+                    HTTPRestAPI.udpServer?.SendOne(player.connId, segment, DeliveryMethod.ReliableOrdered);
+                else HTTPRestAPI.webServer?.SendOne(player.connId, segment);
+                return;
+            }
 
             if (string.IsNullOrWhiteSpace(auth.roomName) || string.IsNullOrWhiteSpace(auth.clientSecret) ||
                 !Lobby.TryGetRoom(auth.roomName, out var room) || room == null)
