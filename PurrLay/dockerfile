@@ -2,14 +2,9 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
-# Copy entire solution (context must be solution root)
-COPY PurrLay.sln .
-COPY PurrLay.Shared/ PurrLay.Shared/
-COPY PurrLay.UdpV1/ PurrLay.UdpV1/
-COPY PurrLay.UdpV2/ PurrLay.UdpV2/
-COPY PurrLay/ PurrLay/
-
-RUN dotnet publish PurrLay/PurrLay.csproj -c Release -o /app
+# Copy everything (includes PurrLay.Shared, PurrLay.UdpV1, PurrLay.UdpV2)
+COPY . .
+RUN dotnet publish -c Release -o /app
 
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
 WORKDIR /app

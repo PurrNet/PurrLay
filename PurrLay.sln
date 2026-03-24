@@ -4,11 +4,11 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PurrLay", "PurrLay\PurrLay.
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PurrBalancer", "PurrBalancer\PurrBalancer.csproj", "{2FB0BD0B-76A2-41B5-A607-FD4DD7883438}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PurrLay.Shared", "PurrLay.Shared\PurrLay.Shared.csproj", "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PurrLay.Shared", "PurrLay\PurrLay.Shared\PurrLay.Shared.csproj", "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PurrLay.UdpV1", "PurrLay.UdpV1\PurrLay.UdpV1.csproj", "{B2C3D4E5-F6A7-8901-BCDE-F12345678901}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PurrLay.UdpV1", "PurrLay\PurrLay.UdpV1\PurrLay.UdpV1.csproj", "{B2C3D4E5-F6A7-8901-BCDE-F12345678901}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PurrLay.UdpV2", "PurrLay.UdpV2\PurrLay.UdpV2.csproj", "{C3D4E5F6-A7B8-9012-CDEF-123456789012}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PurrLay.UdpV2", "PurrLay\PurrLay.UdpV2\PurrLay.UdpV2.csproj", "{C3D4E5F6-A7B8-9012-CDEF-123456789012}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

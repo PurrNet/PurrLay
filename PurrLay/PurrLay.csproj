@@ -5,6 +5,8 @@
         <TargetFramework>net8.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <!-- Exclude nested sub-projects from default globbing -->
+        <DefaultItemExcludes>$(DefaultItemExcludes);PurrLay.Shared\**;PurrLay.UdpV1\**;PurrLay.UdpV2\**</DefaultItemExcludes>
     </PropertyGroup>
 
     <ItemGroup>
@@ -14,9 +16,9 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\PurrLay.Shared\PurrLay.Shared.csproj" />
-        <ProjectReference Include="..\PurrLay.UdpV1\PurrLay.UdpV1.csproj" />
-        <ProjectReference Include="..\PurrLay.UdpV2\PurrLay.UdpV2.csproj" />
+        <ProjectReference Include="PurrLay.Shared\PurrLay.Shared.csproj" />
+        <ProjectReference Include="PurrLay.UdpV1\PurrLay.UdpV1.csproj" />
+        <ProjectReference Include="PurrLay.UdpV2\PurrLay.UdpV2.csproj" />
     </ItemGroup>
 
     <ItemGroup>

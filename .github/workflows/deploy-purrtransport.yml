@@ -145,6 +145,7 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       - name: Deploy Relay
+        working-directory: PurrLay
         run: |
           flyctl deploy --remote-only --strategy immediate \
             --app "${APP_NAME}-${{ matrix.prefix }}" \
