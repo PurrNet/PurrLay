@@ -247,16 +247,16 @@ public static class Transport
 
     public static void OnClientLeft(PlayerInfo conn)
     {
-        // Pipe clients are tracked separately
-        if (PipeRelay.RemoveClient(conn.connId))
-            return;
-
-        // Clean up connection tracking
+        // Always clean up connection tracking regardless of client type
         lock (_transportLock)
         {
             _connToUDP.Remove(conn.connId);
         }
         HTTPRestAPI.RemoveUdpVersionTracking(conn.connId);
+
+        // Pipe clients are tracked separately — no room cleanup needed
+        if (PipeRelay.RemoveClient(conn.connId))
+            return;
 
         ulong roomId;
         bool isHost = false;
@@ -300,17 +300,21 @@ public static class Transport
         }
         else if (clientsList != null)
         {
-            // Remove client from list
+            // Remove client from list, then notify outside the lock
+            int count = -1;
             lock (_transportLock)
             {
                 if (_roomToClients.TryGetValue(roomId, out var list))
                 {
                     list.Remove(conn);
-                    var count = list.Count;
-                    // Release lock before calling external method
-                    SendClientsDisconnected(roomId, conn);
-                    Lobby.UpdateRoomPlayerCount(roomId, count);
+                    count = list.Count;
                 }
+            }
+
+            if (count >= 0)
+            {
+                SendClientsDisconnected(roomId, conn);
+                Lobby.UpdateRoomPlayerCount(roomId, count);
             }
         }
     }

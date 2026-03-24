@@ -102,7 +102,7 @@ public class UdpServerV2 : IUdpServer, INetLogger
 
     public void WriteNet(NetLogLevel level, string str, params object[] args)
     {
-        Console.WriteLine($"LiteNetV2 {level}: {str}", args);
+        Console.WriteLine($"LiteNetV2 {level}: {string.Format(str, args)}");
     }
 
     public void KickClient(int playerConnId)
