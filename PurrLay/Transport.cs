@@ -14,7 +14,7 @@ public static class Transport
     static readonly object _transportLock = new();
 
     static readonly NetDataWriter _writer = new();
-    private static int _nextConnId;
+    private static int _nextConnId = 1;
 
     public static bool TryGetRoomPlayerCount(ulong roomId, out int count)
     {
