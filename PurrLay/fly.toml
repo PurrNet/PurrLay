@@ -25,13 +25,21 @@ primary_region = 'ewr'
     port = 6942
     handlers = ["tls"]
 
-# UDP service on port 7777
+# UDP service on port 7777 (LiteNetLib V1)
 [[services]]
   internal_port = 7777
   protocol = "udp"
   processes = ["app"]
   [[services.ports]]
     port = 7777
+
+# UDP service on port 7778 (LiteNetLib V2)
+[[services]]
+  internal_port = 7778
+  protocol = "udp"
+  processes = ["app"]
+  [[services.ports]]
+    port = 7778
 
 [[vm]]
   memory = '512mb'

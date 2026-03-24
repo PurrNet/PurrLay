@@ -51,11 +51,13 @@ internal static class Program
         [UsedImplicitly] public string apiEndpoint;
         [UsedImplicitly] public string host;
         [UsedImplicitly] public int udpPort;
+        [UsedImplicitly] public int udpPortV2;
         [UsedImplicitly] public int webSocketsPort;
         [UsedImplicitly] public string region;
     }
 
     public const int UDP_PORT = 7777;
+    public const int UDP_PORT_V2 = 7778;
 
     static async void RegisterRelayToBalancer()
     {
@@ -97,6 +99,7 @@ internal static class Program
                 apiEndpoint = endpoint,
                 host = domain,
                 udpPort = UDP_PORT,
+                udpPortV2 = UDP_PORT_V2,
                 webSocketsPort = 6942,
                 region = region
             };

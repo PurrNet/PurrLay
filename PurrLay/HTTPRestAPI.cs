@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Net;
 using System.Text;
 using Newtonsoft.Json.Linq;
@@ -11,7 +11,56 @@ namespace PurrLay;
 public static class HTTPRestAPI
 {
     public static WebSockets? webServer;
-    public static UdpServer? udpServer;
+    public static IUdpServer? udpServerV1;
+    public static IUdpServer? udpServerV2;
+
+    /// <summary>
+    /// Maps global connection IDs to which UDP version they connected through.
+    /// 1 = V1 (LiteNetLib 1.x), 2 = V2 (LiteNetLib 2.x).
+    /// </summary>
+    static readonly Dictionary<int, int> _connToUdpVersion = new();
+    static readonly object _versionLock = new();
+
+    static UdpServerCallbacks CreateCallbacks(int version) => new()
+    {
+        ReserveConnId = isUdp =>
+        {
+            var connId = Transport.ReserveConnId(isUdp);
+            lock (_versionLock)
+            {
+                _connToUdpVersion[connId] = version;
+            }
+            return connId;
+        },
+        OnClientLeft = Transport.OnClientLeft,
+        OnDataReceived = Transport.OnServerReceivedData
+    };
+
+    /// <summary>
+    /// Returns the correct UDP server for the given connection ID,
+    /// based on which server that connection came through.
+    /// </summary>
+    public static IUdpServer? GetUdpServerForConnection(int connId)
+    {
+        int version;
+        lock (_versionLock)
+        {
+            if (!_connToUdpVersion.TryGetValue(connId, out version))
+                return udpServerV1; // fallback to V1
+        }
+        return version == 2 ? udpServerV2 : udpServerV1;
+    }
+
+    /// <summary>
+    /// Removes the UDP version tracking entry for a disconnected connection.
+    /// </summary>
+    public static void RemoveUdpVersionTracking(int connId)
+    {
+        lock (_versionLock)
+        {
+            _connToUdpVersion.Remove(connId);
+        }
+    }
 
     public static async Task RegisterRoom(string region, string roomName)
     {
@@ -85,6 +134,7 @@ public static class HTTPRestAPI
         public string? secret;
         public int port;
         public int udpPort;
+        public int udpPortV2;
     }
 
     public static async Task<ApiResponse> OnRequest(HttpRequestBase req)
@@ -127,7 +177,8 @@ public static class HTTPRestAPI
         var secret = await Lobby.CreateRoom(region, name);
 
         webServer ??= new WebSockets(6942);
-        udpServer ??= new UdpServer(Program.UDP_PORT);
+        udpServerV1 ??= new UdpServerV1(Program.UDP_PORT, CreateCallbacks(1));
+        udpServerV2 ??= new UdpServerV2(Program.UDP_PORT_V2, CreateCallbacks(2));
 
         bool ssl = Env.TryGetValueOrDefault("HOST_SSL", "false") == "true";
 
@@ -136,7 +187,8 @@ public static class HTTPRestAPI
             ssl = ssl,
             port = webServer.port,
             secret = secret,
-            udpPort = Program.UDP_PORT
+            udpPort = Program.UDP_PORT,
+            udpPortV2 = Program.UDP_PORT_V2
         }));
     }
 
@@ -147,7 +199,7 @@ public static class HTTPRestAPI
         if (string.IsNullOrWhiteSpace(name))
             throw new Exception("Missing name");
 
-        if (webServer == null || udpServer == null)
+        if (webServer == null || udpServerV1 == null)
             throw new Exception("No rooms available");
 
         if (!Lobby.TryGetRoom(name, out var room) || room == null)
@@ -160,14 +212,15 @@ public static class HTTPRestAPI
             ssl = ssl,
             port = webServer.port,
             secret = room.clientSecret,
-            udpPort = Program.UDP_PORT
+            udpPort = Program.UDP_PORT,
+            udpPortV2 = Program.UDP_PORT_V2
         }));
     }
 
     private static ApiResponse GetTotalConnections(HttpRequestBase req)
     {
         var totalConnections = Transport.GetTotalConnectionCount();
-        
+
         return new ApiResponse(JObject.FromObject(new
         {
             totalConnections = totalConnections

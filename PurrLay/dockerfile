@@ -14,5 +14,7 @@ ENV HOST=+
 ENV PORT=8081
 
 EXPOSE ${PORT}
+EXPOSE 7777/udp
+EXPOSE 7778/udp
 
 ENTRYPOINT ["dotnet", "PurrLay.dll"]

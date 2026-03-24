@@ -1,6 +1,3 @@
-using LiteNetLib;
-using LiteNetLib.Utils;
-
 namespace PurrLay;
 
 /// <summary>
@@ -12,7 +9,8 @@ public static class PipeRelay
 {
     static readonly Dictionary<int, bool> _pipeClients = new(); // connId → isUdp
     static readonly object _pipeLock = new();
-    static readonly NetDataWriter _writer = new();
+    [ThreadStatic] static PacketWriter? _writerField;
+    static PacketWriter _writer => _writerField ??= new PacketWriter();
 
     public static bool IsClient(int connId)
     {
@@ -39,13 +37,13 @@ public static class PipeRelay
 
         int targetConnId;
         ArraySegment<byte> payload;
-        var method = DeliveryMethod.ReliableOrdered;
+        byte method = Transport.RELIABLE_ORDERED;
 
         if (sender.isUdp)
         {
             // UDP: [deliveryMethod(1)] [targetConnId(4)] [data]
             if (data.Count < 6) return;
-            method = (DeliveryMethod)data.Array[data.Offset];
+            method = data.Array[data.Offset];
             targetConnId = ReadInt(data.Array, data.Offset + 1);
             payload = new ArraySegment<byte>(data.Array, data.Offset + 5, data.Count - 5);
         }
@@ -73,7 +71,7 @@ public static class PipeRelay
         var segment = _writer.AsReadOnlySpan();
 
         if (targetIsUdp)
-            HTTPRestAPI.udpServer?.SendOne(targetConnId, segment, method);
+            HTTPRestAPI.GetUdpServerForConnection(targetConnId)?.SendOne(targetConnId, segment, method);
         else
             HTTPRestAPI.webServer?.SendOne(targetConnId, segment);
     }

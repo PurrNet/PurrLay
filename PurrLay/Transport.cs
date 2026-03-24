@@ -1,19 +1,23 @@
-﻿using System.Text;
-using LiteNetLib;
-using LiteNetLib.Utils;
+using System.Text;
 using Newtonsoft.Json;
 
 namespace PurrLay;
 
 public static class Transport
 {
+    /// <summary>
+    /// DeliveryMethod.ReliableOrdered byte value — same across LiteNetLib v1 and v2.
+    /// </summary>
+    public const byte RELIABLE_ORDERED = 2;
+
     static readonly Dictionary<PlayerInfo, ulong> _clientToRoom = new();
     static readonly Dictionary<ulong, List<PlayerInfo>> _roomToClients = new();
     static readonly Dictionary<ulong, PlayerInfo> _roomToHost = new();
     static readonly Dictionary<int, bool> _connToUDP = new();
     static readonly object _transportLock = new();
 
-    static readonly NetDataWriter _writer = new();
+    [ThreadStatic] static PacketWriter? _writerField;
+    static PacketWriter _writer => _writerField ??= new PacketWriter();
     private static int _nextConnId = 1;
 
     public static bool TryGetRoomPlayerCount(ulong roomId, out int count)
@@ -46,7 +50,7 @@ public static class Transport
     static void KickPlayer(PlayerInfo player)
     {
         if (player.isUdp)
-            HTTPRestAPI.udpServer?.KickClient(player.connId);
+            HTTPRestAPI.GetUdpServerForConnection(player.connId)?.KickClient(player.connId);
         else HTTPRestAPI.webServer?.KickClient(player.connId);
     }
 
@@ -66,7 +70,7 @@ public static class Transport
         var segment = _writer.AsReadOnlySpan();
 
         if (host.isUdp)
-             HTTPRestAPI.udpServer?.SendOne(host.connId, segment, DeliveryMethod.ReliableOrdered);
+             HTTPRestAPI.GetUdpServerForConnection(host.connId)?.SendOne(host.connId, segment, RELIABLE_ORDERED);
         else HTTPRestAPI.webServer?.SendOne(host.connId, segment);
     }
 
@@ -140,13 +144,13 @@ public static class Transport
                         break;
 
                     ArraySegment<byte> rawData;
-                    var method = DeliveryMethod.ReliableOrdered;
+                    byte method = RELIABLE_ORDERED;
 
                     if (sender.isUdp)
                     {
                         rawData = new ArraySegment<byte>(
                             subData.Array, subData.Offset + metdataLength + 1, subData.Count - metdataLength - 1);
-                        method = (DeliveryMethod)subData.Array[subData.Offset + 4];
+                        method = subData.Array[subData.Offset + 4];
                     }
                     else
                     {
@@ -156,7 +160,7 @@ public static class Transport
 
                     if (isUDP)
                     {
-                        HTTPRestAPI.udpServer?.SendOne(target, rawData, method);
+                        HTTPRestAPI.GetUdpServerForConnection(target)?.SendOne(target, rawData, method);
                     }
                     else
                     {
@@ -231,8 +235,8 @@ public static class Transport
 
             if (host.isUdp)
             {
-                var method = sender.isUdp ? (DeliveryMethod)data[0] : DeliveryMethod.ReliableOrdered;
-                HTTPRestAPI.udpServer?.SendOne(host.connId, segment, method);
+                byte method = sender.isUdp ? data[0] : RELIABLE_ORDERED;
+                HTTPRestAPI.GetUdpServerForConnection(host.connId)?.SendOne(host.connId, segment, method);
             }
             else
             {
@@ -246,6 +250,13 @@ public static class Transport
         // Pipe clients are tracked separately
         if (PipeRelay.RemoveClient(conn.connId))
             return;
+
+        // Clean up connection tracking
+        lock (_transportLock)
+        {
+            _connToUDP.Remove(conn.connId);
+        }
+        HTTPRestAPI.RemoveUdpVersionTracking(conn.connId);
 
         ulong roomId;
         bool isHost = false;
@@ -329,7 +340,7 @@ public static class Transport
 
                 var segment = _writer.AsReadOnlySpan();
                 if (player.isUdp)
-                    HTTPRestAPI.udpServer?.SendOne(player.connId, segment, DeliveryMethod.ReliableOrdered);
+                    HTTPRestAPI.GetUdpServerForConnection(player.connId)?.SendOne(player.connId, segment, RELIABLE_ORDERED);
                 else HTTPRestAPI.webServer?.SendOne(player.connId, segment);
                 return;
             }
@@ -402,7 +413,7 @@ public static class Transport
         var segment = _writer.AsReadOnlySpan();
 
         if (player.isUdp)
-            HTTPRestAPI.udpServer?.SendOne(player.connId, segment, DeliveryMethod.ReliableOrdered);
+            HTTPRestAPI.GetUdpServerForConnection(player.connId)?.SendOne(player.connId, segment, RELIABLE_ORDERED);
         else HTTPRestAPI.webServer?.SendOne(player.connId, segment);
     }
 
@@ -426,7 +437,7 @@ public static class Transport
 
         var segment = _writer.AsReadOnlySpan();
         if (connId.isUdp)
-             HTTPRestAPI.udpServer?.SendOne(connId.connId, segment, DeliveryMethod.ReliableOrdered);
+             HTTPRestAPI.GetUdpServerForConnection(connId.connId)?.SendOne(connId.connId, segment, RELIABLE_ORDERED);
         else HTTPRestAPI.webServer?.SendOne(connId.connId, segment);
     }
 
@@ -445,7 +456,7 @@ public static class Transport
 
         var segment = _writer.AsReadOnlySpan();
         if (connId.isUdp)
-            HTTPRestAPI.udpServer?.SendOne(connId.connId, segment, DeliveryMethod.ReliableOrdered);
+            HTTPRestAPI.GetUdpServerForConnection(connId.connId)?.SendOne(connId.connId, segment, RELIABLE_ORDERED);
         else HTTPRestAPI.webServer?.SendOne(connId.connId, segment);
     }
 }

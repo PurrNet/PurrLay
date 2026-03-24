@@ -1,21 +1,22 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Sockets;
 using LiteNetLib;
-using PurrBalancer;
 
 namespace PurrLay;
 
-public class UdpServer : INetLogger
+public class UdpServerV2 : IUdpServer, INetLogger
 {
     private readonly NetManager _server;
     private readonly EventBasedNetListener _serverListener;
+    private readonly UdpServerCallbacks _callbacks;
 
-    static readonly Dictionary<NetPeer, int> _localConnToGlobal = new();
-    static readonly Dictionary<int, NetPeer> _globalConnToLocal = new();
-    static readonly object _udpConnLock = new();
+    private readonly Dictionary<NetPeer, int> _localConnToGlobal = new();
+    private readonly Dictionary<int, NetPeer> _globalConnToLocal = new();
+    private readonly object _udpConnLock = new();
 
-    public UdpServer(int port)
+    public UdpServerV2(int port, UdpServerCallbacks callbacks)
     {
+        _callbacks = callbacks;
         NetDebug.Logger = this;
         _serverListener = new EventBasedNetListener();
 
@@ -32,14 +33,14 @@ public class UdpServer : INetLogger
         _serverListener.PeerDisconnectedEvent += OnServerDisconnected;
         _serverListener.NetworkReceiveEvent += OnServerData;
 
-        if (Env.TryGetValue("FLY_PROCESS_GROUP", out _))
+        if (Environment.GetEnvironmentVariable("FLY_PROCESS_GROUP") != null)
         {
             var addresses = Dns.GetHostAddresses("fly-global-services");
             var ipv4 = addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
                        ?? IPAddress.Any;
             var ipv6 = addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetworkV6)
                        ?? IPAddress.IPv6Any;
-            Console.WriteLine($"START: IPv4: {ipv4}, IPv6: {ipv6}");
+            Console.WriteLine($"UdpV2 START: IPv4: {ipv4}, IPv6: {ipv6}");
             _server.Start(ipv4, ipv6, port);
         }
         else _server.Start(port);
@@ -50,10 +51,10 @@ public class UdpServer : INetLogger
         request.AcceptIfKey("PurrNet");
     }
 
-    private static void OnServerConnected(NetPeer conn)
+    private void OnServerConnected(NetPeer conn)
     {
-        Console.WriteLine("Client connected to UDP");
-        var global = Transport.ReserveConnId(true);
+        Console.WriteLine("Client connected to UDP (V2)");
+        var global = _callbacks.ReserveConnId(true);
         lock (_udpConnLock)
         {
             _localConnToGlobal[conn] = global;
@@ -61,7 +62,7 @@ public class UdpServer : INetLogger
         }
     }
 
-    private static void OnServerDisconnected(NetPeer connId, DisconnectInfo disconnectinfo)
+    private void OnServerDisconnected(NetPeer connId, DisconnectInfo disconnectinfo)
     {
         try
         {
@@ -72,15 +73,15 @@ public class UdpServer : INetLogger
                     return;
                 _globalConnToLocal.Remove(global);
             }
-            Transport.OnClientLeft(new PlayerInfo(global, true));
+            _callbacks.OnClientLeft(new PlayerInfo(global, true));
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"Error handling disconnect: {e.Message}\n{e.StackTrace}");
+            Console.Error.WriteLine($"Error handling disconnect (V2): {e.Message}\n{e.StackTrace}");
         }
     }
 
-    private static void OnServerData(NetPeer connId, NetPacketReader reader, byte channel, DeliveryMethod deliverymethod)
+    private void OnServerData(NetPeer connId, NetPacketReader reader, byte channel, DeliveryMethod deliverymethod)
     {
         try
         {
@@ -91,17 +92,17 @@ public class UdpServer : INetLogger
                 if (!_localConnToGlobal.TryGetValue(connId, out globalId))
                     return;
             }
-            Transport.OnServerReceivedData(new PlayerInfo(globalId, true), data);
+            _callbacks.OnDataReceived(new PlayerInfo(globalId, true), data);
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"Error handling data: {e.Message}\n{e.StackTrace}");
+            Console.Error.WriteLine($"Error handling data (V2): {e.Message}\n{e.StackTrace}");
         }
     }
 
     public void WriteNet(NetLogLevel level, string str, params object[] args)
     {
-        Console.WriteLine($"{level}: {str}", args);
+        Console.WriteLine($"LiteNetV2 {level}: {str}", args);
     }
 
     public void KickClient(int playerConnId)
@@ -116,8 +117,10 @@ public class UdpServer : INetLogger
         _server.DisconnectPeer(peer);
     }
 
-    public void SendOne(int valueConnId, ReadOnlySpan<byte> segment, DeliveryMethod method)
+    public void SendOne(int valueConnId, ReadOnlySpan<byte> segment, byte deliveryMethod)
     {
+        var method = (DeliveryMethod)deliveryMethod;
+
         NetPeer? peer;
         lock (_udpConnLock)
         {
@@ -139,13 +142,13 @@ public class UdpServer : INetLogger
         {
             if (isReliable)
             {
-                Console.WriteLine($"Warning: Sending {segment.Length} bytes over {method} UDP, MTU is {mtu}; upgrading to ReliableOrdered");
+                Console.WriteLine($"Warning: V2 sending {segment.Length} bytes over {method} UDP, MTU is {mtu}; upgrading to ReliableOrdered");
                 peer.Send(segment, DeliveryMethod.ReliableOrdered);
                 return;
             }
 
-            // if we are not reliable, just drop the packet
-            Console.Error.WriteLine($"Error sending data: Cannot send {segment.Length} bytes over {method} UDP, MTU is {mtu}");
+            Console.Error.WriteLine($"Error sending data (V2): Cannot send {segment.Length} bytes over {method} UDP, MTU is {mtu}");
+            return;
         }
 
         try
@@ -154,7 +157,7 @@ public class UdpServer : INetLogger
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"Error sending data: {e.Message}\n{e.StackTrace}");
+            Console.Error.WriteLine($"Error sending data (V2): {e.Message}\n{e.StackTrace}");
         }
     }
 }

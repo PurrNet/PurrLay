@@ -1,4 +1,4 @@
-﻿namespace PurrLay;
+namespace PurrLay;
 
 public record struct PlayerInfo(int connId, bool isUdp)
 {
