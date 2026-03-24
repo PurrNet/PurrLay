@@ -177,8 +177,8 @@ public static class HTTPRestAPI
         var secret = await Lobby.CreateRoom(region, name);
 
         webServer ??= new WebSockets(6942);
-        udpServerV1 ??= new UdpServerV1(Program.UDP_PORT, CreateCallbacks(1));
-        udpServerV2 ??= new UdpServerV2(Program.UDP_PORT_V2, CreateCallbacks(2));
+        udpServerV1 ??= UdpServerFactory.CreateV1(Program.UDP_PORT, CreateCallbacks(1));
+        udpServerV2 ??= UdpServerFactory.CreateV2(Program.UDP_PORT_V2, CreateCallbacks(2));
 
         bool ssl = Env.TryGetValueOrDefault("HOST_SSL", "false") == "true";
 

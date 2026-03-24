@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
         <OutputType>Exe</OutputType>
@@ -17,8 +17,11 @@
 
     <ItemGroup>
         <ProjectReference Include="PurrLay.Shared\PurrLay.Shared.csproj" />
-        <ProjectReference Include="PurrLay.UdpV1\PurrLay.UdpV1.csproj" />
-        <ProjectReference Include="PurrLay.UdpV2\PurrLay.UdpV2.csproj" />
+        <!-- V1/V2 are loaded at runtime via AssemblyLoadContext, not compiled against directly.
+             ReferenceOutputAssembly=false means we don't get a compile-time reference,
+             but the projects still build as dependencies. -->
+        <ProjectReference Include="PurrLay.UdpV1\PurrLay.UdpV1.csproj" ReferenceOutputAssembly="false" />
+        <ProjectReference Include="PurrLay.UdpV2\PurrLay.UdpV2.csproj" ReferenceOutputAssembly="false" />
     </ItemGroup>
 
     <ItemGroup>
@@ -31,5 +34,17 @@
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </Content>
     </ItemGroup>
+
+    <!-- After build, publish each UDP plugin to its own isolated directory -->
+    <Target Name="PublishUdpPlugins" AfterTargets="Build">
+        <Exec Command="dotnet publish &quot;$(ProjectDir)PurrLay.UdpV1\PurrLay.UdpV1.csproj&quot; -c $(Configuration) -o &quot;$(OutputPath)plugins\udp-v1&quot; --no-build" />
+        <Exec Command="dotnet publish &quot;$(ProjectDir)PurrLay.UdpV2\PurrLay.UdpV2.csproj&quot; -c $(Configuration) -o &quot;$(OutputPath)plugins\udp-v2&quot; --no-build" />
+    </Target>
+
+    <!-- Same for publish -->
+    <Target Name="PublishUdpPluginsOnPublish" AfterTargets="Publish">
+        <Exec Command="dotnet publish &quot;$(ProjectDir)PurrLay.UdpV1\PurrLay.UdpV1.csproj&quot; -c $(Configuration) -o &quot;$(PublishDir)plugins\udp-v1&quot;" />
+        <Exec Command="dotnet publish &quot;$(ProjectDir)PurrLay.UdpV2\PurrLay.UdpV2.csproj&quot; -c $(Configuration) -o &quot;$(PublishDir)plugins\udp-v2&quot;" />
+    </Target>
 
 </Project>
