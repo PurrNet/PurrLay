@@ -52,6 +52,16 @@ public static class HTTPRestAPI
     }
 
     /// <summary>
+    /// Returns true if the connection came through the UDP V2 server (LiteNetLib 2.x).
+    /// NAT hole-punching is only offered between two V2 UDP peers.
+    /// </summary>
+    public static bool IsUdpV2(int connId)
+    {
+        lock (_versionLock)
+            return _connToUdpVersion.TryGetValue(connId, out var version) && version == 2;
+    }
+
+    /// <summary>
     /// Removes the UDP version tracking entry for a disconnected connection.
     /// </summary>
     public static void RemoveUdpVersionTracking(int connId)

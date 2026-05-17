@@ -14,6 +14,8 @@ public static class Transport
     static readonly Dictionary<ulong, List<PlayerInfo>> _roomToClients = new();
     static readonly Dictionary<ulong, PlayerInfo> _roomToHost = new();
     static readonly Dictionary<int, bool> _connToUDP = new();
+    // connIds of peers that authenticated with `nat = true` (support NAT hole-punching).
+    static readonly HashSet<int> _natCapable = new();
     static readonly object _transportLock = new();
 
     [ThreadStatic] static PacketWriter? _writerField;
@@ -251,6 +253,7 @@ public static class Transport
         lock (_transportLock)
         {
             _connToUDP.Remove(conn.connId);
+            _natCapable.Remove(conn.connId);
         }
         HTTPRestAPI.RemoveUdpVersionTracking(conn.connId);
 
@@ -379,6 +382,9 @@ public static class Transport
                     return;
                 }
 
+                if (auth.nat)
+                    _natCapable.Add(player.connId);
+
                 if (!_roomToClients.TryGetValue(room.roomId, out var list))
                 {
                     _roomToClients.Add(room.roomId, [player]);
@@ -391,6 +397,26 @@ public static class Transport
                     Lobby.UpdateRoomPlayerCount(room.roomId, list.Count);
                 }
             }
+
+            // A client just joined — if both it and the host support NAT punch, introduce them
+            // so they can attempt a direct P2P link.
+            //
+            // Ordering matters on BOTH sides:
+            //  - To the host, SERVER_NAT_INTRODUCE is sent BEFORE SERVER_CLIENT_CONNECTED so the
+            //    host learns a punch is pending before it decides how to route that connection.
+            //  - To the client, it is sent BEFORE SERVER_AUTHENTICATED because once a client is
+            //    "connected" its relay receive path treats every packet as unframed game data.
+            // Both are reliable-ordered, so send-order == receive-order.
+            //
+            // Limitation: only the joining client is introduced, and only to a host that
+            // is already present. A client that authenticates before the host has no
+            // partner yet, and it cannot be introduced retroactively — once it receives
+            // SERVER_AUTHENTICATED its receive path treats every packet as unframed game
+            // data, so a later SERVER_NAT_INTRODUCE can't reach it. Such a client stays
+            // relay-only for the whole session. Hosts normally authenticate first, so this
+            // is an edge case; closing it would require a client-side protocol change.
+            if (!isHost)
+                TryStartNatIntroduce(room.roomId, player);
 
             // Send notifications outside the lock
             if (existingClients != null)
@@ -407,6 +433,56 @@ public static class Transport
             SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED);
             Console.Error.WriteLine($"Authentication failed (exception): {e.Message}\n{e.StackTrace}");
         }
+    }
+
+    /// <summary>
+    /// If the host and the freshly-joined client both support NAT punch and are both on
+    /// UDP V2, send each a SERVER_NAT_INTRODUCE with a shared token. They will each ask the
+    /// relay (acting as mediator) to introduce them, then attempt a direct P2P connection.
+    /// </summary>
+    static void TryStartNatIntroduce(ulong roomId, PlayerInfo client)
+    {
+        PlayerInfo host;
+        lock (_transportLock)
+        {
+            if (!_roomToHost.TryGetValue(roomId, out host))
+                return;
+
+            if (!_natCapable.Contains(host.connId) || !_natCapable.Contains(client.connId))
+                return;
+        }
+
+        // NAT hole-punching only works between two real UDP V2 sockets
+        // (WebSocket peers and the older V1 server cannot punch).
+        if (!host.isUdp || !client.isUdp)
+            return;
+
+        if (!HTTPRestAPI.IsUdpV2(host.connId) || !HTTPRestAPI.IsUdpV2(client.connId))
+            return;
+
+        // Token must be identical on both sides. It ENDS with the client connId so the
+        // host can map the resulting P2P peer back to the correct relay connection
+        // (the host parses the segment after the last '_').
+        //
+        // The random middle segment is a security boundary, not decoration: this token
+        // also serves as the P2P connection-accept key on the host. roomId and connId are
+        // sequential counters, so a "roomId_connId" token would be trivially guessable and
+        // would let an attacker pair with / connect to the host in place of the real peer.
+        var token = $"{roomId}_{Guid.NewGuid():N}_{client.connId}";
+        SendNatIntroduce(host, token);
+        SendNatIntroduce(client, token);
+    }
+
+    static void SendNatIntroduce(PlayerInfo player, string token)
+    {
+        _writer.Reset();
+        _writer.Put((byte)SERVER_PACKET_TYPE.SERVER_NAT_INTRODUCE);
+
+        var tokenBytes = Encoding.UTF8.GetBytes(token);
+        _writer.Put(tokenBytes, 0, tokenBytes.Length);
+
+        var segment = _writer.AsReadOnlySpan();
+        HTTPRestAPI.GetUdpServerForConnection(player.connId)?.SendOne(player.connId, segment, RELIABLE_ORDERED);
     }
 
     static void SendSingleCode(PlayerInfo player, SERVER_PACKET_TYPE type)

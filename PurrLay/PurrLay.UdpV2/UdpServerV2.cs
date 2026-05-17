@@ -14,6 +14,16 @@ public class UdpServerV2 : IUdpServer, INetLogger
     private readonly Dictionary<int, NetPeer> _globalConnToLocal = new();
     private readonly object _udpConnLock = new();
 
+    // --- NAT punch mediation ---
+    private readonly EventBasedNatPunchListener _natListener = new();
+    private readonly Dictionary<string, PendingNatPeer> _pendingNat = new();
+    private readonly object _natLock = new();
+
+    /// <summary>How long a half-paired NAT introduce request lingers before being purged.</summary>
+    private static readonly TimeSpan NatRequestTimeout = TimeSpan.FromSeconds(20);
+
+    private readonly record struct PendingNatPeer(IPEndPoint Internal, IPEndPoint External, DateTime ReceivedAt);
+
     public UdpServerV2(int port, UdpServerCallbacks callbacks)
     {
         _callbacks = callbacks;
@@ -25,8 +35,14 @@ public class UdpServerV2 : IUdpServer, INetLogger
             UnconnectedMessagesEnabled = true,
             PingInterval = 900,
             UnsyncedEvents = true,
-            DisconnectTimeout = 20000
+            DisconnectTimeout = 20000,
+            // Act as a NAT introduction mediator for peers that opt in.
+            NatPunchEnabled = true
         };
+
+        _natListener.NatIntroductionRequest += OnNatIntroductionRequest;
+        _server.NatPunchModule.UnsyncedEvents = true;
+        _server.NatPunchModule.Init(_natListener);
 
         _serverListener.ConnectionRequestEvent += OnServerConnectionRequest;
         _serverListener.PeerConnectedEvent += OnServerConnected;
@@ -97,6 +113,66 @@ public class UdpServerV2 : IUdpServer, INetLogger
         catch (Exception e)
         {
             Console.Error.WriteLine($"Error handling data (V2): {e.Message}\n{e.StackTrace}");
+        }
+    }
+
+    /// <summary>
+    /// Mediator side of NAT hole-punching. Two peers that were told to punch (via
+    /// SERVER_NAT_INTRODUCE) each send an introduce request carrying the same token.
+    /// We pair them up and introduce them to each other so they can connect directly.
+    /// </summary>
+    private void OnNatIntroductionRequest(IPEndPoint localEndPoint, IPEndPoint remoteEndPoint, string token)
+    {
+        try
+        {
+            PendingNatPeer? partner = null;
+            var incoming = new PendingNatPeer(localEndPoint, remoteEndPoint, DateTime.UtcNow);
+
+            lock (_natLock)
+            {
+                // Drop stale half-pairs so a missing partner never wedges a token.
+                if (_pendingNat.Count > 0)
+                {
+                    var now = DateTime.UtcNow;
+                    var stale = _pendingNat
+                        .Where(kv => now - kv.Value.ReceivedAt > NatRequestTimeout)
+                        .Select(kv => kv.Key)
+                        .ToList();
+                    foreach (var key in stale)
+                        _pendingNat.Remove(key);
+                }
+
+                if (_pendingNat.TryGetValue(token, out var existing))
+                {
+                    // Same peer re-sending while waiting — just refresh, don't self-pair.
+                    if (existing.External.Equals(remoteEndPoint))
+                    {
+                        _pendingNat[token] = incoming;
+                    }
+                    else
+                    {
+                        partner = existing;
+                        _pendingNat.Remove(token);
+                    }
+                }
+                else
+                {
+                    _pendingNat[token] = incoming;
+                }
+            }
+
+            if (partner is { } p)
+            {
+                _server.NatPunchModule.NatIntroduce(
+                    p.Internal, p.External,
+                    incoming.Internal, incoming.External,
+                    token);
+                Console.WriteLine($"NAT introduce paired token '{token}': {p.External} <-> {incoming.External}");
+            }
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"Error handling NAT introduce request (V2): {e.Message}\n{e.StackTrace}");
         }
     }
 
