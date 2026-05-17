@@ -22,12 +22,8 @@ jobs:
 
       - name: Ensure app exists
         run: |
-          if ! flyctl apps list | grep -q "^$APP_NAME"; then
-            echo "Creating app $APP_NAME in region $BAL_REGION"
-            flyctl apps create $APP_NAME
-          else
-            echo "App $APP_NAME already exists"
-          fi
+          echo "Ensuring app $APP_NAME exists in region $BAL_REGION"
+          flyctl apps create $APP_NAME 2>/dev/null || echo "App $APP_NAME already exists"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
@@ -135,12 +131,8 @@ jobs:
       - name: Ensure app exists
         run: |
           RELAY_APP="${APP_NAME}-${{ matrix.prefix }}"
-          if ! flyctl apps list | grep -q "^$RELAY_APP"; then
-            echo "Creating relay app $RELAY_APP in region ${{ matrix.region }}"
-            flyctl apps create $RELAY_APP
-          else
-            echo "Relay app $RELAY_APP already exists"
-          fi
+          echo "Ensuring relay app $RELAY_APP exists in region ${{ matrix.region }}"
+          flyctl apps create $RELAY_APP 2>/dev/null || echo "Relay app $RELAY_APP already exists"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
