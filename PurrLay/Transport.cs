@@ -387,6 +387,7 @@ public static class Transport
 
             bool isHost = false;
             List<PlayerInfo>? existingClients = null;
+            bool hadExistingClients = false;
 
             lock (_transportLock)
             {
@@ -417,7 +418,9 @@ public static class Transport
                 }
                 else
                 {
-                    existingClients = list;
+                    hadExistingClients = true;
+                    if (isHost)
+                        existingClients = new List<PlayerInfo>(list);
                     list.Add(player);
                     Lobby.UpdateRoomPlayerCount(room.roomId, list.Count);
                 }
@@ -444,10 +447,13 @@ public static class Transport
                 TryStartNatIntroduce(room.roomId, player);
 
             // Send notifications outside the lock
-            if (existingClients != null)
+            if (hadExistingClients)
             {
                 if (isHost)
-                     SendClientsConnected(room.roomId, existingClients);
+                {
+                    if (existingClients is { Count: > 0 })
+                        SendClientsConnected(room.roomId, existingClients);
+                }
                 else SendClientsConnected(room.roomId, player);
             }
 
