@@ -11,6 +11,34 @@ public class Room
     public DateTime createdAt;
     public ulong roomId;
     public DateTime? emptySince; // When the room became empty (null if room has players)
+    public int migrationGeneration;
+    public string? migrationFencingToken;
+    public string? migrationPromotedPlayerId;
+    public DateTime? migrationClaimedAt;
+}
+
+public readonly struct MigrationRoomSnapshot
+{
+    public readonly string? name;
+    public readonly string? hostSecret;
+    public readonly string? clientSecret;
+    public readonly ulong roomId;
+    public readonly int generation;
+    public readonly string? fencingToken;
+    public readonly string? promotedPlayerId;
+    public readonly DateTime? claimedAt;
+
+    public MigrationRoomSnapshot(Room room)
+    {
+        name = room.name;
+        hostSecret = room.hostSecret;
+        clientSecret = room.clientSecret;
+        roomId = room.roomId;
+        generation = room.migrationGeneration;
+        fencingToken = room.migrationFencingToken;
+        promotedPlayerId = room.migrationPromotedPlayerId;
+        claimedAt = room.migrationClaimedAt;
+    }
 }
 
 public static class Lobby
@@ -20,6 +48,8 @@ public static class Lobby
     static readonly object _roomLock = new();
 
     static int _roomIdCounter;
+
+    static string NewSecret() => Guid.NewGuid().ToString().Replace("-", "");
 
     /// <summary>
     /// Executes an async task in a fire-and-forget manner, logging any exceptions.
@@ -41,7 +71,7 @@ public static class Lobby
 
     public static async Task<string> CreateRoom(string region, string name)
     {
-        var hostSecret = Guid.NewGuid().ToString().Replace("-", "");
+        var hostSecret = NewSecret();
 
         lock (_roomLock)
         {
@@ -52,7 +82,7 @@ public static class Lobby
 
                 var now = DateTime.UtcNow;
                 existing.hostSecret = hostSecret;
-                existing.clientSecret = Guid.NewGuid().ToString().Replace("-", "");
+                existing.clientSecret = NewSecret();
                 existing.createdAt = now;
                 existing.emptySince = now; // Room is being reused but still empty, track from now
                 return hostSecret;
@@ -72,7 +102,7 @@ public static class Lobby
             {
                 name = name,
                 hostSecret = hostSecret,
-                clientSecret = Guid.NewGuid().ToString().Replace("-", ""),
+                clientSecret = NewSecret(),
                 createdAt = now,
                 roomId = roomId,
                 emptySince = now // Room starts empty, track from creation time
@@ -82,12 +112,65 @@ public static class Lobby
         return hostSecret;
     }
 
+    public static MigrationRoomSnapshot ClaimMigration(
+        string name,
+        string claimSecret,
+        string? promotedPlayerId,
+        int? expectedGeneration)
+    {
+        ulong roomId;
+        MigrationRoomSnapshot snapshot;
+
+        lock (_roomLock)
+        {
+            if (!_room.TryGetValue(name, out var room))
+                throw new Exception("Room not found");
+
+            if (!string.Equals(room.clientSecret, claimSecret) && !string.Equals(room.hostSecret, claimSecret))
+                throw new Exception("Invalid migration secret");
+
+            if (expectedGeneration.HasValue && room.migrationGeneration != expectedGeneration.Value)
+                throw new Exception($"Migration generation mismatch. Expected {expectedGeneration.Value}, current {room.migrationGeneration}");
+
+            var now = DateTime.UtcNow;
+            room.hostSecret = NewSecret();
+            room.clientSecret = NewSecret();
+            room.createdAt = now;
+            room.emptySince = null;
+            room.migrationGeneration++;
+            room.migrationFencingToken = NewSecret();
+            room.migrationPromotedPlayerId = promotedPlayerId;
+            room.migrationClaimedAt = now;
+
+            roomId = room.roomId;
+            snapshot = new MigrationRoomSnapshot(room);
+        }
+
+        Transport.ReleaseRoomHostForMigration(roomId);
+        return snapshot;
+    }
+
     public static bool TryGetRoom(string name, out Room? room)
     {
         lock (_roomLock)
         {
             return _room.TryGetValue(name, out room);
         }
+    }
+
+    public static bool TryGetMigrationState(string name, out MigrationRoomSnapshot snapshot)
+    {
+        lock (_roomLock)
+        {
+            if (_room.TryGetValue(name, out var room))
+            {
+                snapshot = new MigrationRoomSnapshot(room);
+                return true;
+            }
+        }
+
+        snapshot = default;
+        return false;
     }
 
     public static void UpdateRoomPlayerCount(ulong roomId, int newPlayerCount)

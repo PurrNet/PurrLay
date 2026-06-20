@@ -49,6 +49,31 @@ public static class Transport
         return connId;
     }
 
+    public static void ReleaseRoomHostForMigration(ulong roomId)
+    {
+        PlayerInfo host;
+        int count = -1;
+
+        lock (_transportLock)
+        {
+            if (!_roomToHost.Remove(roomId, out host))
+                return;
+
+            _clientToRoom.Remove(host);
+
+            if (_roomToClients.TryGetValue(roomId, out var clients))
+            {
+                clients.Remove(host);
+                count = clients.Count;
+            }
+        }
+
+        KickPlayer(host);
+
+        if (count >= 0)
+            Lobby.UpdateRoomPlayerCount(roomId, count);
+    }
+
     static void KickPlayer(PlayerInfo player)
     {
         if (player.isUdp)

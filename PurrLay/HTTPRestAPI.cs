@@ -147,6 +147,21 @@ public static class HTTPRestAPI
         public int udpPortV2;
     }
 
+    [Serializable]
+    internal struct MigrationJoinInfo
+    {
+        public bool ssl;
+        public string? secret;
+        public int port;
+        public int udpPort;
+        public int udpPortV2;
+        public string? roomName;
+        public int generation;
+        public string? fencingToken;
+        public string? promotedPlayerId;
+        public string? claimedAt;
+    }
+
     public static async Task<ApiResponse> OnRequest(HttpRequestBase req)
     {
         if (req.Url == null)
@@ -160,10 +175,59 @@ public static class HTTPRestAPI
             case "/ping": return new ApiResponse(HttpStatusCode.OK);
             case "/getJoinDetails": return GetJoinDetails(req);
             case "/allocate_ws": return await AllocateWebSockets(req);
+            case "/migration/claim": return ClaimMigration(req);
+            case "/migration/current": return GetMigrationCurrent(req);
             case "/getTotalConnections": return GetTotalConnections(req);
             default:
                 return new ApiResponse(HttpStatusCode.NotFound);
         }
+    }
+
+    private static ApiResponse ClaimMigration(HttpRequestBase req)
+    {
+        var name = req.RetrieveHeaderValue("name");
+        var internalSec = req.RetrieveHeaderValue("internal_key_secret");
+        var claimSecret = req.RetrieveHeaderValue("migration_secret") ??
+                          req.RetrieveHeaderValue("client_secret") ??
+                          req.RetrieveHeaderValue("host_secret") ??
+                          req.RetrieveHeaderValue("secret");
+        var promotedPlayerId = req.RetrieveHeaderValue("promoted_player_id") ??
+                               req.RetrieveHeaderValue("promoted_player");
+        var expectedGeneration = ParseExpectedGeneration(req);
+
+        if (string.IsNullOrWhiteSpace(name))
+            throw new Exception("Missing name");
+
+        if (string.IsNullOrWhiteSpace(internalSec))
+            throw new Exception("Bad internal secret, -1");
+
+        if (!string.Equals(internalSec, Program.SECRET_INTERNAL))
+            throw new Exception($"Bad internal secret, {internalSec.Length}");
+
+        if (string.IsNullOrWhiteSpace(claimSecret))
+            throw new Exception("Missing migration secret");
+
+        if (webServer == null || udpServerV1 == null)
+            throw new Exception("No rooms available");
+
+        var snapshot = Lobby.ClaimMigration(name, claimSecret, promotedPlayerId, expectedGeneration);
+        return new ApiResponse(JObject.FromObject(ToMigrationJoinInfo(snapshot, snapshot.hostSecret)));
+    }
+
+    private static ApiResponse GetMigrationCurrent(HttpRequestBase req)
+    {
+        var name = req.RetrieveHeaderValue("name");
+
+        if (string.IsNullOrWhiteSpace(name))
+            throw new Exception("Missing name");
+
+        if (webServer == null || udpServerV1 == null)
+            throw new Exception("No rooms available");
+
+        if (!Lobby.TryGetMigrationState(name, out var snapshot))
+            throw new Exception("Room not found");
+
+        return new ApiResponse(JObject.FromObject(ToMigrationJoinInfo(snapshot, snapshot.clientSecret)));
     }
 
     private static async Task<ApiResponse> AllocateWebSockets(HttpRequestBase req)
@@ -235,5 +299,38 @@ public static class HTTPRestAPI
         {
             totalConnections = totalConnections
         }));
+    }
+
+    private static int? ParseExpectedGeneration(HttpRequestBase req)
+    {
+        var generation = req.RetrieveHeaderValue("expected_generation") ??
+                         req.RetrieveHeaderValue("previous_generation");
+
+        if (string.IsNullOrWhiteSpace(generation))
+            return null;
+
+        if (!int.TryParse(generation, out var parsed))
+            throw new Exception("Invalid expected generation");
+
+        return parsed;
+    }
+
+    private static MigrationJoinInfo ToMigrationJoinInfo(MigrationRoomSnapshot snapshot, string? secret)
+    {
+        var ssl = Env.TryGetValueOrDefault("HOST_SSL", "false") == "true";
+
+        return new MigrationJoinInfo
+        {
+            ssl = ssl,
+            port = webServer?.port ?? 0,
+            secret = secret,
+            udpPort = Program.UDP_PORT,
+            udpPortV2 = Program.UDP_PORT_V2,
+            roomName = snapshot.name,
+            generation = snapshot.generation,
+            fencingToken = snapshot.fencingToken,
+            promotedPlayerId = snapshot.promotedPlayerId,
+            claimedAt = snapshot.claimedAt?.ToString("O", CultureInfo.InvariantCulture)
+        };
     }
 }

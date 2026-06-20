@@ -141,6 +141,10 @@ public static class HTTPRestAPI
                 return await HandleJoin(req);
             case "/allocate_ws":
                 return await AllocateRoom(req);
+            case "/migration/claim":
+                return await ClaimMigration(req);
+            case "/migration/current":
+                return await GetMigrationCurrent(req);
             case "/list":
                 return await SearchRooms(req);
             case "/getTotalConnections":
@@ -148,6 +152,88 @@ public static class HTTPRestAPI
             default:
                 return new ApiResponse(HttpStatusCode.NotFound);
         }
+    }
+
+    private static async Task<ApiResponse> ClaimMigration(HttpRequestBase req)
+    {
+        return await ForwardMigrationRequest(req, "/migration/claim", true);
+    }
+
+    private static async Task<ApiResponse> GetMigrationCurrent(HttpRequestBase req)
+    {
+        return await ForwardMigrationRequest(req, "/migration/current", false);
+    }
+
+    private static async Task<ApiResponse> ForwardMigrationRequest(
+        HttpRequestBase req,
+        string relayPath,
+        bool includeClaimHeaders)
+    {
+        if (req.Method != WatsonWebserver.Core.HttpMethod.GET)
+            return new ApiResponse(HttpStatusCode.NoContent);
+
+        var name = req.RetrieveHeaderValue("name");
+
+        if (string.IsNullOrEmpty(name))
+            throw new Exception("PurrBalancer_migration: Invalid headers");
+
+        string? region;
+        lock (_roomToRegionLock)
+        {
+            if (!_roomToRegion.TryGetValue(name, out region))
+                throw new Exception("PurrBalancer: Room not found");
+        }
+
+        if (string.IsNullOrEmpty(region) || !TryGetServer(region, out var server))
+            throw new Exception("PurrBalancer: Invalid region");
+
+        using HttpClient client = new();
+
+        client.DefaultRequestHeaders.Add("name", name);
+        client.DefaultRequestHeaders.Add("region", region);
+        client.DefaultRequestHeaders.Add("internal_key_secret", Program.SECRET_INTERNAL);
+
+        if (includeClaimHeaders)
+        {
+            AddOptionalForwardedHeader(client, req, "migration_secret");
+            AddOptionalForwardedHeader(client, req, "client_secret");
+            AddOptionalForwardedHeader(client, req, "host_secret");
+            AddOptionalForwardedHeader(client, req, "secret");
+            AddOptionalForwardedHeader(client, req, "promoted_player_id");
+            AddOptionalForwardedHeader(client, req, "promoted_player");
+            AddOptionalForwardedHeader(client, req, "expected_generation");
+            AddOptionalForwardedHeader(client, req, "previous_generation");
+        }
+
+        var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+            $"{server.apiEndpoint}{relayPath}"));
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var content = await response.Content.ReadAsByteArrayAsync();
+            var contentStr = Encoding.UTF8.GetString(content);
+            throw new Exception(contentStr);
+        }
+
+        try
+        {
+            var respStr = await response.Content.ReadAsStringAsync();
+            var obj = JObject.Parse(respStr);
+            obj["host"] = server.host;
+            return new ApiResponse(obj);
+        }
+        catch (Exception e)
+        {
+            throw new Exception("Invalid response " + e.Message + "\n" + e.StackTrace);
+        }
+    }
+
+    private static void AddOptionalForwardedHeader(HttpClient client, HttpRequestBase req, string name)
+    {
+        var value = req.RetrieveHeaderValue(name);
+
+        if (!string.IsNullOrWhiteSpace(value))
+            client.DefaultRequestHeaders.Add(name, value);
     }
 
     private static Task<ApiResponse> SearchRooms(HttpRequestBase req)
