@@ -136,7 +136,7 @@ public static class Lobby
             room.hostSecret = NewSecret();
             room.clientSecret = NewSecret();
             room.createdAt = now;
-            room.emptySince = null;
+            room.emptySince = now;
             room.migrationGeneration++;
             room.migrationFencingToken = NewSecret();
             room.migrationPromotedPlayerId = promotedPlayerId;
@@ -147,6 +147,10 @@ public static class Lobby
         }
 
         Transport.ReleaseRoomHostForMigration(roomId);
+
+        if (!Transport.TryGetRoomPlayerCount(roomId, out _))
+            UpdateRoomPlayerCount(roomId, 0);
+
         return snapshot;
     }
 

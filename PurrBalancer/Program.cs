@@ -62,6 +62,7 @@ internal static class Program
         try
         {
             HTTPRestAPI.StartHealthCheckService();
+            HTTPRestAPI.StartEmptyRoomCleanupService();
 
             var host = Env.TryGetValueOrDefault("HOST", "localhost");
             var port = Env.TryGetIntOrDefault("PORT", 8080);

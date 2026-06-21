@@ -135,8 +135,54 @@ public static class HTTPRestAPI
     static readonly Dictionary<string, string> _roomToServerEndpoint = new();
     private static readonly object _roomToRegionLock = new();
     private static readonly object _roomsLock = new();
+    private static readonly object _emptyRoomsLock = new();
 
     private static readonly List<RoomInfo> _rooms = new();
+    private static readonly Dictionary<string, DateTime> _emptyRoomSince = new();
+
+    public static async void StartEmptyRoomCleanupService()
+    {
+        try
+        {
+            const int DEFAULT_TIMEOUT_SECONDS = 300;
+            const int SECONDS_BETWEEN_CHECKS = 30;
+            var timeoutSeconds = Env.TryGetIntOrDefault("EMPTY_ROOM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS);
+            var timeout = TimeSpan.FromSeconds(timeoutSeconds);
+
+            while (true)
+            {
+                await Task.Delay(SECONDS_BETWEEN_CHECKS * 1000);
+
+                try
+                {
+                    var now = DateTime.UtcNow;
+                    List<string> roomsToRemove = [];
+
+                    lock (_emptyRoomsLock)
+                    {
+                        foreach (var (roomName, emptySince) in _emptyRoomSince)
+                        {
+                            if (now - emptySince >= timeout)
+                                roomsToRemove.Add(roomName);
+                        }
+                    }
+
+                    if (roomsToRemove.Count == 0)
+                        continue;
+
+                    RemoveRoomsByName(roomsToRemove);
+                }
+                catch (Exception e)
+                {
+                    await Console.Error.WriteLineAsync($"Error StartEmptyRoomCleanupService tick: {e.Message}\n{e.StackTrace}");
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            await Console.Error.WriteLineAsync($"Error StartEmptyRoomCleanupService: {e.Message}\n{e.StackTrace}");
+        }
+    }
 
     static bool TryGetRoomServer(string roomName, out RelayServer server)
     {
@@ -175,6 +221,8 @@ public static class HTTPRestAPI
         if (roomsToRemove.Count == 0)
             return;
 
+        RemoveEmptyRoomTracking(roomsToRemove);
+
         lock (_roomsLock)
         {
             for (var i = _rooms.Count - 1; i >= 0; i--)
@@ -183,6 +231,65 @@ public static class HTTPRestAPI
                     _rooms.RemoveAt(i);
             }
         }
+    }
+
+    static void TrackRoomPlayerCount(string name, int count)
+    {
+        lock (_emptyRoomsLock)
+        {
+            if (count <= 0)
+            {
+                _emptyRoomSince.TryAdd(name, DateTime.UtcNow);
+                return;
+            }
+
+            _emptyRoomSince.Remove(name);
+        }
+    }
+
+    static void RemoveEmptyRoomTracking(IReadOnlyCollection<string> roomNames)
+    {
+        lock (_emptyRoomsLock)
+        {
+            foreach (var roomName in roomNames)
+                _emptyRoomSince.Remove(roomName);
+        }
+    }
+
+    static void RemoveRoomsByName(IReadOnlyCollection<string> roomNames)
+    {
+        if (roomNames.Count == 0)
+            return;
+
+        List<string> removedRooms = [];
+
+        lock (_roomToRegionLock)
+        {
+            foreach (var roomName in roomNames)
+            {
+                if (!_roomToRegion.Remove(roomName, out _))
+                    continue;
+
+                _roomToServerEndpoint.Remove(roomName);
+                removedRooms.Add(roomName);
+            }
+        }
+
+        if (removedRooms.Count == 0)
+            return;
+
+        RemoveEmptyRoomTracking(removedRooms);
+
+        lock (_roomsLock)
+        {
+            for (var i = _rooms.Count - 1; i >= 0; i--)
+            {
+                if (removedRooms.Contains(_rooms[i].name))
+                    _rooms.RemoveAt(i);
+            }
+        }
+
+        Console.WriteLine($"Removed {removedRooms.Count} empty room(s): {string.Join(", ", removedRooms)}");
     }
 
     public static async Task<ApiResponse> OnRequest(HttpRequestBase req)
@@ -435,6 +542,8 @@ public static class HTTPRestAPI
             _roomToServerEndpoint.Remove(name);
         }
 
+        RemoveEmptyRoomTracking(new[] { name });
+
         lock (_roomsLock)
         {
             for (var i = 0; i < _rooms.Count; i++)
@@ -473,6 +582,8 @@ public static class HTTPRestAPI
             if (!_roomToRegion.ContainsKey(name))
                 throw new Exception("PurrBalancer: Room not found");
         }
+
+        TrackRoomPlayerCount(name, countNumber);
 
         lock (_roomsLock)
         {
@@ -528,6 +639,8 @@ public static class HTTPRestAPI
 
             _roomToServerEndpoint.Add(name, server.apiEndpoint);
         }
+
+        TrackRoomPlayerCount(name, 0);
 
         lock (_roomsLock)
         {
