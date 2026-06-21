@@ -59,6 +59,17 @@ internal static class Program
     public const int UDP_PORT = 7777;
     public const int UDP_PORT_V2 = 7778;
 
+    internal static string GetRelayEndpoint()
+    {
+        var ssl = Env.TryGetValueOrDefault("HOST_SSL", "false");
+        var domain = Env.TryGetValueOrDefault("HOST_DOMAIN", Env.TryGetValueOrDefault("HOST", "localhost"));
+        var hostPort = Env.TryGetIntOrDefault("HOST_PORT", -1);
+        var urlPort = hostPort == -1 ? "" : $":{hostPort}";
+
+        return Env.TryGetValueOrDefault("HOST_ENDPOINT",
+            (ssl == "true" ? "https://" : "http://") + domain + urlPort);
+    }
+
     static async void RegisterRelayToBalancer()
     {
         try
@@ -89,14 +100,9 @@ internal static class Program
                 return;
             }
 
-            var hostPort = Env.TryGetIntOrDefault("HOST_PORT", -1);
-            string urlPort = hostPort == -1 ? "" : $":{hostPort}";
-
-            string endpoint = Env.TryGetValueOrDefault("HOST_ENDPOINT", (ssl == "true" ? "https://" : "http://") + domain + urlPort);
-
             var server = new RelayServer
             {
-                apiEndpoint = endpoint,
+                apiEndpoint = GetRelayEndpoint(),
                 host = domain,
                 udpPort = UDP_PORT,
                 udpPortV2 = UDP_PORT_V2,

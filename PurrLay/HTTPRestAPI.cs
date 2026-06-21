@@ -81,6 +81,7 @@ public static class HTTPRestAPI
 
         client.DefaultRequestHeaders.Add("name", roomName);
         client.DefaultRequestHeaders.Add("region", region);
+        client.DefaultRequestHeaders.Add("relay_endpoint", Program.GetRelayEndpoint());
         client.DefaultRequestHeaders.Add("internal_key_secret", Program.SECRET_INTERNAL);
 
         var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get,

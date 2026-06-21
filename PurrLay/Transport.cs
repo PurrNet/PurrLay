@@ -304,8 +304,18 @@ public static class Transport
                 // Get clients list before removing
                 if (_roomToClients.Remove(roomId, out clientsList))
                 {
-                    // Make a copy to avoid holding lock while kicking
-                    clientsList = new List<PlayerInfo>(clientsList);
+                    var remainingClients = new List<PlayerInfo>();
+                    for (var i = 0; i < clientsList.Count; i++)
+                    {
+                        var client = clientsList[i];
+                        if (client.Equals(conn))
+                            continue;
+
+                        _clientToRoom.Remove(client);
+                        remainingClients.Add(client);
+                    }
+
+                    clientsList = remainingClients;
                 }
             }
             else if (_roomToClients.TryGetValue(roomId, out clientsList))
@@ -317,14 +327,18 @@ public static class Transport
 
         if (isHost)
         {
-            // Kick all clients and remove room
+            // Kick clients so they observe host loss. Keep the room around briefly when
+            // clients existed so one of them can claim it for host migration.
             if (clientsList != null)
             {
                 for (var i = 0; i < clientsList.Count; i++)
                     KickPlayer(clientsList[i]);
             }
 
-            Lobby.RemoveRoom(roomId);
+            if (clientsList is { Count: > 0 })
+                Lobby.UpdateRoomPlayerCount(roomId, 0);
+            else
+                Lobby.RemoveRoom(roomId);
         }
         else if (clientsList != null)
         {

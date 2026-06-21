@@ -64,6 +64,7 @@ public static class HTTPRestAPI
 
                     if (!success)
                     {
+                        var removedServer = false;
                         lock (_relayServers)
                         {
                             for (var i = index; i < relayCount; i++)
@@ -71,11 +72,15 @@ public static class HTTPRestAPI
                                 if (_relayServers[i].apiEndpoint == endpoint)
                                 {
                                     _relayServers.RemoveAt(i);
+                                    removedServer = true;
                                     index--;
                                     break;
                                 }
                             }
                         }
+
+                        if (removedServer)
+                            RemoveRoomsForServerEndpoint(endpoint);
 
                         await Console.Error.WriteLineAsync($"PurrBalancer: Server `{endpoint}` is down");
                     }
@@ -107,11 +112,78 @@ public static class HTTPRestAPI
         }
     }
 
+    static bool TryGetServerByEndpoint(string endpoint, out RelayServer server)
+    {
+        lock (_relayServers)
+        {
+            for (var i = 0; i < _relayServers.Count; i++)
+            {
+                var candidate = _relayServers[i];
+                if (string.Equals(candidate.apiEndpoint, endpoint, StringComparison.Ordinal))
+                {
+                    server = candidate;
+                    return true;
+                }
+            }
+
+            server = default;
+            return false;
+        }
+    }
+
     static readonly Dictionary<string, string> _roomToRegion = new();
+    static readonly Dictionary<string, string> _roomToServerEndpoint = new();
     private static readonly object _roomToRegionLock = new();
     private static readonly object _roomsLock = new();
 
     private static readonly List<RoomInfo> _rooms = new();
+
+    static bool TryGetRoomServer(string roomName, out RelayServer server)
+    {
+        string? endpoint;
+        lock (_roomToRegionLock)
+        {
+            if (!_roomToServerEndpoint.TryGetValue(roomName, out endpoint))
+            {
+                server = default;
+                return false;
+            }
+        }
+
+        return TryGetServerByEndpoint(endpoint, out server);
+    }
+
+    static void RemoveRoomsForServerEndpoint(string endpoint)
+    {
+        List<string> roomsToRemove = [];
+
+        lock (_roomToRegionLock)
+        {
+            foreach (var room in _roomToServerEndpoint)
+            {
+                if (string.Equals(room.Value, endpoint, StringComparison.Ordinal))
+                    roomsToRemove.Add(room.Key);
+            }
+
+            for (var i = 0; i < roomsToRemove.Count; i++)
+            {
+                _roomToServerEndpoint.Remove(roomsToRemove[i]);
+                _roomToRegion.Remove(roomsToRemove[i]);
+            }
+        }
+
+        if (roomsToRemove.Count == 0)
+            return;
+
+        lock (_roomsLock)
+        {
+            for (var i = _rooms.Count - 1; i >= 0; i--)
+            {
+                if (roomsToRemove.Contains(_rooms[i].name))
+                    _rooms.RemoveAt(i);
+            }
+        }
+    }
 
     public static async Task<ApiResponse> OnRequest(HttpRequestBase req)
     {
@@ -177,20 +249,13 @@ public static class HTTPRestAPI
         if (string.IsNullOrEmpty(name))
             throw new Exception("PurrBalancer_migration: Invalid headers");
 
-        string? region;
-        lock (_roomToRegionLock)
-        {
-            if (!_roomToRegion.TryGetValue(name, out region))
-                throw new Exception("PurrBalancer: Room not found");
-        }
-
-        if (string.IsNullOrEmpty(region) || !TryGetServer(region, out var server))
-            throw new Exception("PurrBalancer: Invalid region");
+        if (!TryGetRoomServer(name, out var server))
+            throw new Exception("PurrBalancer: Room not found");
 
         using HttpClient client = new();
 
         client.DefaultRequestHeaders.Add("name", name);
-        client.DefaultRequestHeaders.Add("region", region);
+        client.DefaultRequestHeaders.Add("region", server.region);
         client.DefaultRequestHeaders.Add("internal_key_secret", Program.SECRET_INTERNAL);
 
         if (includeClaimHeaders)
@@ -319,20 +384,13 @@ public static class HTTPRestAPI
         if (string.IsNullOrEmpty(name))
             throw new Exception("PurrBalancer_join: Invalid headers");
 
-        string region;
-        lock (_roomToRegionLock)
-        {
-            if (!_roomToRegion.TryGetValue(name, out region))
-                throw new Exception("PurrBalancer: Room not found");
-        }
-
-        if (!TryGetServer(region, out var server))
-            throw new Exception("PurrBalancer: Invalid region");
+        if (!TryGetRoomServer(name, out var server))
+            throw new Exception("PurrBalancer: Room not found");
 
         using HttpClient client = new();
 
         client.DefaultRequestHeaders.Add("name", name);
-        client.DefaultRequestHeaders.Add("region", region);
+        client.DefaultRequestHeaders.Add("region", server.region);
         client.DefaultRequestHeaders.Add("internal_key_secret", Program.SECRET_INTERNAL);
 
         var r = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get,
@@ -373,6 +431,8 @@ public static class HTTPRestAPI
         {
             if (!_roomToRegion.Remove(name, out _))
                 throw new Exception("PurrBalancer: Room not found");
+
+            _roomToServerEndpoint.Remove(name);
         }
 
         lock (_roomsLock)
@@ -438,6 +498,7 @@ public static class HTTPRestAPI
     {
         var region = req.RetrieveHeaderValue("region");
         var name = req.RetrieveHeaderValue("name");
+        var relayEndpoint = req.RetrieveHeaderValue("relay_endpoint");
         var internalSecret = req.RetrieveHeaderValue("internal_key_secret");
 
         if (string.IsNullOrEmpty(region) || string.IsNullOrEmpty(name) || string.IsNullOrEmpty(internalSecret))
@@ -446,13 +507,26 @@ public static class HTTPRestAPI
         if (!string.Equals(internalSecret, Program.SECRET_INTERNAL))
             throw new Exception("PurrBalancer: Invalid internal secret");
 
-        if (!TryGetServer(region, out _))
+        RelayServer server;
+        if (!string.IsNullOrEmpty(relayEndpoint))
+        {
+            if (!TryGetServerByEndpoint(relayEndpoint, out server))
+                throw new Exception("PurrBalancer: Invalid relay endpoint when registering room");
+
+            if (!string.Equals(server.region, region, StringComparison.Ordinal))
+                throw new Exception("PurrBalancer: Relay endpoint region mismatch when registering room");
+        }
+        else if (!TryGetServer(region, out server))
+        {
             throw new Exception("PurrBalancer: Invalid region when registering room");
+        }
 
         lock (_roomToRegionLock)
         {
             if (!_roomToRegion.TryAdd(name, region))
                 throw new Exception("PurrBalancer: Room already registered");
+
+            _roomToServerEndpoint.Add(name, server.apiEndpoint);
         }
 
         lock (_roomsLock)
@@ -487,7 +561,7 @@ public static class HTTPRestAPI
         {
             for (var i = 0; i < _relayServers.Count; i++)
             {
-                if (_relayServers[i].region == server.region)
+                if (string.Equals(_relayServers[i].apiEndpoint, server.apiEndpoint, StringComparison.Ordinal))
                 {
                     _relayServers[i] = server;
                     return new ApiResponse(new JObject
@@ -519,14 +593,22 @@ public static class HTTPRestAPI
         var body = req.DataAsString;
         var server = JObject.Parse(body).ToObject<RelayServer>();
 
+        var removedServer = false;
         lock (_relayServers)
         {
             for (var i = 0; i < _relayServers.Count; i++)
             {
-                if (_relayServers[i].host == server.host)
+                if (string.Equals(_relayServers[i].apiEndpoint, server.apiEndpoint, StringComparison.Ordinal))
+                {
                     _relayServers.RemoveAt(i);
+                    removedServer = true;
+                    break;
+                }
             }
         }
+
+        if (removedServer)
+            RemoveRoomsForServerEndpoint(server.apiEndpoint);
 
         return new ApiResponse(new JObject
         {
