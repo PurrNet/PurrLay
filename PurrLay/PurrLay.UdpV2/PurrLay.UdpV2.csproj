@@ -4,12 +4,14 @@
         <TargetFramework>net8.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     </PropertyGroup>
 
-    <ItemGroup>
-        <PackageReference Include="LiteNetLib" Version="2.1.2" />
-    </ItemGroup>
-
+    <!-- LiteNetLib is vendored under LiteNetLib/ instead of the NuGet package: upstream 2.1.2
+         (commit baf4601f) with the RTT estimator fix from PurrNet's copy applied to
+         LiteNetPeer.cs and LiteNetManager.Socket.cs. A missed pong no longer feeds the ping
+         interval into the RTT estimator, which used to inflate reliable resend delays toward
+         clients suffering packet loss. -->
     <ItemGroup>
         <ProjectReference Include="..\PurrLay.Shared\PurrLay.Shared.csproj" />
     </ItemGroup>
