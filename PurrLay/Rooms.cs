@@ -15,6 +15,13 @@ public class Room
     public string? migrationFencingToken;
     public string? migrationPromotedPlayerId;
     public DateTime? migrationClaimedAt;
+    internal string instanceId = Guid.NewGuid().ToString("N");
+    internal string? previousInstanceId;
+    internal bool registered;
+    internal bool registrationInProgress;
+    internal bool removed;
+    internal bool removalInProgress;
+    internal long countSequence;
 }
 
 public readonly struct MigrationRoomSnapshot
@@ -45,7 +52,8 @@ public static class Lobby
 {
     static readonly Dictionary<string, Room> _room = new();
     static readonly Dictionary<ulong, string> _roomIdToName = new();
-    static readonly object _roomLock = new();
+    internal static readonly object SyncRoot = new();
+    static readonly object _roomLock = SyncRoot;
 
     static int _roomIdCounter;
 
@@ -71,45 +79,64 @@ public static class Lobby
 
     public static async Task<string> CreateRoom(string region, string name)
     {
-        var hostSecret = NewSecret();
-
+        Room room;
         lock (_roomLock)
         {
             if (_room.TryGetValue(name, out var existing))
             {
+                if (existing.registrationInProgress)
+                    throw new Exception("Room creation already in progress");
+
                 if (Transport.TryGetRoomPlayerCount(existing.roomId, out var currentCount) && currentCount > 0)
                     throw new Exception("Room already exists");
-
-                var now = DateTime.UtcNow;
-                existing.hostSecret = hostSecret;
-                existing.clientSecret = NewSecret();
-                existing.createdAt = now;
-                existing.emptySince = now; // Room is being reused but still empty, track from now
-                return hostSecret;
             }
-        }
 
-        await HTTPRestAPI.RegisterRoom(region, name);
-
-        Console.WriteLine($"Registered room {name}");
-        
-        lock (_roomLock)
-        {
-            var roomId = (ulong)Interlocked.Increment(ref _roomIdCounter) - 1;
-            _roomIdToName.Add(roomId, name);
-            var now = DateTime.UtcNow;
-            _room.Add(name, new Room
+            if (existing != null && !existing.registered && !existing.removed)
             {
-                name = name,
-                hostSecret = hostSecret,
-                clientSecret = NewSecret(),
-                createdAt = now,
-                roomId = roomId,
-                emptySince = now // Room starts empty, track from creation time
-            });
+                room = existing;
+            }
+            else
+            {
+                room = new Room
+                {
+                    name = name,
+                    hostSecret = NewSecret(),
+                    clientSecret = NewSecret(),
+                    createdAt = DateTime.UtcNow,
+                    roomId = (ulong)Interlocked.Increment(ref _roomIdCounter) - 1,
+                    emptySince = DateTime.UtcNow,
+                    previousInstanceId = existing?.instanceId
+                };
+                if (existing != null)
+                {
+                    Transport.RemoveEmptyRoomState(existing.roomId);
+                    _roomIdToName.Remove(existing.roomId);
+                }
+                _room[name] = room;
+                _roomIdToName.Add(room.roomId, name);
+            }
+            room.registrationInProgress = true;
         }
 
-        return hostSecret;
+        try
+        {
+            await HTTPRestAPI.RegisterRoom(region, name, room.instanceId, room.previousInstanceId);
+            lock (_roomLock)
+            {
+                room.registered = true;
+                room.registrationInProgress = false;
+                room.createdAt = DateTime.UtcNow;
+                room.emptySince = room.createdAt;
+            }
+            Console.WriteLine($"Registered room {name}");
+            return room.hostSecret!;
+        }
+        catch
+        {
+            lock (_roomLock)
+                room.registrationInProgress = false;
+            throw;
+        }
     }
 
     public static MigrationRoomSnapshot ClaimMigration(
@@ -123,7 +150,7 @@ public static class Lobby
 
         lock (_roomLock)
         {
-            if (!_room.TryGetValue(name, out var room))
+            if (!_room.TryGetValue(name, out var room) || !room.registered)
                 throw new Exception("Room not found");
 
             if (!string.Equals(room.clientSecret, claimSecret) && !string.Equals(room.hostSecret, claimSecret))
@@ -144,12 +171,12 @@ public static class Lobby
 
             roomId = room.roomId;
             snapshot = new MigrationRoomSnapshot(room);
+
+            Transport.ReleaseRoomHostForMigration(roomId);
+
+            if (!Transport.TryGetRoomPlayerCount(roomId, out _))
+                UpdateRoomPlayerCount(roomId, 0);
         }
-
-        Transport.ReleaseRoomHostForMigration(roomId);
-
-        if (!Transport.TryGetRoomPlayerCount(roomId, out _))
-            UpdateRoomPlayerCount(roomId, 0);
 
         return snapshot;
     }
@@ -158,7 +185,10 @@ public static class Lobby
     {
         lock (_roomLock)
         {
-            return _room.TryGetValue(name, out room);
+            if (_room.TryGetValue(name, out room) && room.registered)
+                return true;
+            room = null;
+            return false;
         }
     }
 
@@ -166,7 +196,7 @@ public static class Lobby
     {
         lock (_roomLock)
         {
-            if (_room.TryGetValue(name, out var room))
+            if (_room.TryGetValue(name, out var room) && room.registered)
             {
                 snapshot = new MigrationRoomSnapshot(room);
                 return true;
@@ -181,14 +211,16 @@ public static class Lobby
     {
         lock (_roomLock)
         {
-            if (_roomIdToName.TryGetValue(roomId, out var name) && _room.TryGetValue(name, out var room))
+            if (_roomIdToName.TryGetValue(roomId, out var name) && _room.TryGetValue(name, out var room) && room.registered)
             {
-                FireAndForget(HTTPRestAPI.updateConnectionCount(name, newPlayerCount), $"updateConnectionCount for room '{name}'");
-                
+                Transport.TryGetRoomPlayerCount(roomId, out newPlayerCount);
+                FireAndForget(HTTPRestAPI.updateConnectionCount(name, newPlayerCount, room.instanceId, ++room.countSequence),
+                    $"updateConnectionCount for room '{name}'");
+
                 // Track when room becomes empty
                 if (newPlayerCount == 0)
                 {
-                    room.emptySince = DateTime.UtcNow;
+                    room.emptySince ??= DateTime.UtcNow;
                 }
                 else
                 {
@@ -202,11 +234,57 @@ public static class Lobby
     {
         lock (_roomLock)
         {
-            if (_roomIdToName.Remove(roomId, out var name))
+            if (_roomIdToName.TryGetValue(roomId, out var name) && _room.TryGetValue(name, out var room) &&
+                !room.registrationInProgress && !room.removalInProgress &&
+                !Transport.TryGetRoomPlayerCount(roomId, out _))
             {
-                _room.Remove(name);
-                FireAndForget(HTTPRestAPI.unegisterRoom(name), $"unregisterRoom for room '{name}'");
+                room.registered = false;
+                room.removed = true;
+                room.removalInProgress = true;
+                room.emptySince ??= DateTime.UtcNow;
+                Transport.RemoveEmptyRoomState(roomId);
+                FireAndForget(UnregisterRoom(room), $"unregisterRoom for room '{name}'");
             }
+        }
+    }
+
+    static async Task UnregisterRoom(Room room)
+    {
+        try
+        {
+            await HTTPRestAPI.unegisterRoom(room.name!, room.instanceId);
+            if (room.previousInstanceId != null)
+                await HTTPRestAPI.unegisterRoom(room.name!, room.previousInstanceId);
+            lock (_roomLock)
+            {
+                if (_room.TryGetValue(room.name!, out var current) && ReferenceEquals(current, room))
+                {
+                    _room.Remove(room.name!);
+                    _roomIdToName.Remove(room.roomId);
+                }
+            }
+        }
+        finally
+        {
+            lock (_roomLock)
+                room.removalInProgress = false;
+        }
+    }
+
+    internal static int CleanupEmptyRooms(DateTime now, TimeSpan timeout)
+    {
+        lock (_roomLock)
+        {
+            var expired = _room.Values.Where(room => !room.registrationInProgress && !room.removalInProgress &&
+                (room.removed || room.emptySince.HasValue && now - room.emptySince.Value >= timeout) &&
+                !Transport.TryGetRoomPlayerCount(room.roomId, out _)).ToArray();
+
+            foreach (var room in expired)
+            {
+                Console.WriteLine($"Removing empty room {room.name} (ID: {room.roomId})");
+                RemoveRoom(room.roomId);
+            }
+            return expired.Length;
         }
     }
 
@@ -217,7 +295,7 @@ public static class Lobby
         const int DEFAULT_TIMEOUT_SECONDS = 300;
         var timeoutSeconds = Env.TryGetIntOrDefault("EMPTY_ROOM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS);
         var timeout = TimeSpan.FromSeconds(timeoutSeconds);
-        
+
         // Check every 30 seconds
         const int CHECK_INTERVAL_SECONDS = 30;
 
@@ -229,47 +307,7 @@ public static class Lobby
             {
                 await Task.Delay(CHECK_INTERVAL_SECONDS * 1000);
 
-                var now = DateTime.UtcNow;
-                var roomsToRemove = new List<(ulong roomId, string name, double emptyDuration)>();
-
-                lock (_roomLock)
-                {
-                    foreach (var (name, room) in _room)
-                    {
-                        // Only check rooms that are empty
-                        // emptySince == null means room has players, skip it
-                        // emptySince.HasValue means room is empty (either never joined or all left)
-                        if (!room.emptySince.HasValue)
-                            continue; // Room has players, skip
-                        
-                        var emptyDuration = now - room.emptySince.Value;
-                        if (emptyDuration >= timeout)
-                        {
-                            roomsToRemove.Add((room.roomId, name, emptyDuration.TotalSeconds));
-                        }
-                    }
-                }
-
-                // Remove timed-out rooms
-                foreach (var (roomId, name, emptyDurationSeconds) in roomsToRemove)
-                {
-                    // Double-check: verify room is still empty and still exists before removing
-                    // TryGetRoomPlayerCount returns false if room has no players (count == 0)
-                    if (!Transport.TryGetRoomPlayerCount(roomId, out _))
-                    {
-                        // Verify room still exists and is still marked as empty
-                        lock (_roomLock)
-                        {
-                            if (_roomIdToName.TryGetValue(roomId, out var roomName) && 
-                                _room.TryGetValue(roomName, out var room) && 
-                                room.emptySince.HasValue)
-                            {
-                                Console.WriteLine($"Removing empty room {roomName} (ID: {roomId}, empty for {emptyDurationSeconds:F0} seconds)");
-                                RemoveRoom(roomId);
-                            }
-                        }
-                    }
-                }
+                CleanupEmptyRooms(DateTime.UtcNow, timeout);
             }
             catch (Exception e)
             {

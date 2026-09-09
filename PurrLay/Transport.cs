@@ -16,7 +16,7 @@ public static class Transport
     static readonly Dictionary<int, bool> _connToUDP = new();
     // connIds of peers that authenticated with `nat = true` (support NAT hole-punching).
     static readonly HashSet<int> _natCapable = new();
-    static readonly object _transportLock = new();
+    static readonly object _transportLock = Lobby.SyncRoot;
 
     [ThreadStatic] static PacketWriter? _writerField;
     static PacketWriter _writer => _writerField ??= new PacketWriter();
@@ -36,6 +36,17 @@ public static class Transport
         lock (_transportLock)
         {
             return _clientToRoom.Count;
+        }
+    }
+
+    internal static void RemoveEmptyRoomState(ulong roomId)
+    {
+        lock (_transportLock)
+        {
+            if (TryGetRoomPlayerCount(roomId, out _))
+                return;
+            _roomToClients.Remove(roomId);
+            _roomToHost.Remove(roomId);
         }
     }
 
@@ -66,12 +77,12 @@ public static class Transport
                 clients.Remove(host);
                 count = clients.Count;
             }
+
+            if (count >= 0)
+                Lobby.UpdateRoomPlayerCount(roomId, count);
         }
 
         KickPlayer(host);
-
-        if (count >= 0)
-            Lobby.UpdateRoomPlayerCount(roomId, count);
     }
 
     static void KickPlayer(PlayerInfo player)
@@ -289,6 +300,7 @@ public static class Transport
         ulong roomId;
         bool isHost = false;
         List<PlayerInfo>? clientsList;
+        bool notifyHost = false;
 
         lock (_transportLock)
         {
@@ -317,11 +329,17 @@ public static class Transport
 
                     clientsList = remainingClients;
                 }
+
+                if (clientsList is { Count: > 0 })
+                    Lobby.UpdateRoomPlayerCount(roomId, 0);
+                else
+                    Lobby.RemoveRoom(roomId);
             }
             else if (_roomToClients.TryGetValue(roomId, out clientsList))
             {
-                // Make a copy of the list reference, we'll modify it outside the lock
-                // Actually, we need to remove from the list, so we'll do it carefully
+                clientsList.Remove(conn);
+                Lobby.UpdateRoomPlayerCount(roomId, clientsList.Count);
+                notifyHost = true;
             }
         }
 
@@ -334,30 +352,10 @@ public static class Transport
                 for (var i = 0; i < clientsList.Count; i++)
                     KickPlayer(clientsList[i]);
             }
-
-            if (clientsList is { Count: > 0 })
-                Lobby.UpdateRoomPlayerCount(roomId, 0);
-            else
-                Lobby.RemoveRoom(roomId);
         }
-        else if (clientsList != null)
+        else if (notifyHost)
         {
-            // Remove client from list, then notify outside the lock
-            int count = -1;
-            lock (_transportLock)
-            {
-                if (_roomToClients.TryGetValue(roomId, out var list))
-                {
-                    list.Remove(conn);
-                    count = list.Count;
-                }
-            }
-
-            if (count >= 0)
-            {
-                SendClientsDisconnected(roomId, conn);
-                Lobby.UpdateRoomPlayerCount(roomId, count);
-            }
+            SendClientsDisconnected(roomId, conn);
         }
     }
 
@@ -391,25 +389,26 @@ public static class Transport
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(auth.roomName) || string.IsNullOrWhiteSpace(auth.clientSecret) ||
-                !Lobby.TryGetRoom(auth.roomName, out var room) || room == null)
-            {
-                SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED);
-                Console.Error.WriteLine("Authentication failed: invalid room or secrets");
-                return;
-            }
-
+            Room? room;
             bool isHost = false;
             List<PlayerInfo>? existingClients = null;
             bool hadExistingClients = false;
 
             lock (_transportLock)
             {
+                if (string.IsNullOrWhiteSpace(auth.roomName) || string.IsNullOrWhiteSpace(auth.clientSecret) ||
+                    !Lobby.TryGetRoom(auth.roomName, out room) || room == null)
+                {
+                    SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED);
+                    Console.Error.WriteLine("Authentication failed: invalid room or secrets");
+                    return;
+                }
+
                 if (room.clientSecret == auth.clientSecret)
                 {
                     _clientToRoom.Add(player, room.roomId);
                 }
-                else if (room.hostSecret == auth.clientSecret)
+                else if (room.hostSecret == auth.clientSecret && !_roomToHost.ContainsKey(room.roomId))
                 {
                     _clientToRoom.Add(player, room.roomId);
                     _roomToHost.Add(room.roomId, player);

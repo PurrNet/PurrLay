@@ -18,6 +18,8 @@ public struct RoomInfo
 public static class HTTPRestAPI
 {
     private static readonly List<RelayServer> _relayServers = [];
+    private static readonly Dictionary<string, string> _lastRelayInstanceIds = new();
+    private static readonly Dictionary<string, HashSet<string>> _retiredRelayInstanceIds = new();
 
     public static async void StartHealthCheckService()
     {
@@ -42,12 +44,14 @@ public static class HTTPRestAPI
                 for (var index = 0; index < relayCount; index++)
                 {
                     string endpoint;
+                    string? relayInstanceId;
                     lock (_relayServers)
                     {
                         relayCount = _relayServers.Count;
                         if (index >= relayCount)
                             break;
                         endpoint = _relayServers[index].apiEndpoint;
+                        relayInstanceId = _relayServers[index].instanceId;
                     }
 
                     bool success;
@@ -64,23 +68,20 @@ public static class HTTPRestAPI
 
                     if (!success)
                     {
-                        var removedServer = false;
                         lock (_relayServers)
                         {
-                            for (var i = index; i < relayCount; i++)
+                            for (var i = 0; i < _relayServers.Count; i++)
                             {
-                                if (_relayServers[i].apiEndpoint == endpoint)
+                                if (_relayServers[i].apiEndpoint == endpoint &&
+                                    string.Equals(_relayServers[i].instanceId, relayInstanceId, StringComparison.Ordinal))
                                 {
                                     _relayServers.RemoveAt(i);
-                                    removedServer = true;
+                                    RemoveRoomsForServerEndpoint(endpoint);
                                     index--;
                                     break;
                                 }
                             }
                         }
-
-                        if (removedServer)
-                            RemoveRoomsForServerEndpoint(endpoint);
 
                         await Console.Error.WriteLineAsync($"PurrBalancer: Server `{endpoint}` is down");
                     }
@@ -133,12 +134,12 @@ public static class HTTPRestAPI
 
     static readonly Dictionary<string, string> _roomToRegion = new();
     static readonly Dictionary<string, string> _roomToServerEndpoint = new();
-    private static readonly object _roomToRegionLock = new();
     private static readonly object _roomsLock = new();
-    private static readonly object _emptyRoomsLock = new();
 
     private static readonly List<RoomInfo> _rooms = new();
     private static readonly Dictionary<string, DateTime> _emptyRoomSince = new();
+    private static readonly Dictionary<string, string> _roomInstanceIds = new();
+    private static readonly Dictionary<string, long> _roomCountSequences = new();
 
     public static async void StartEmptyRoomCleanupService()
     {
@@ -155,22 +156,7 @@ public static class HTTPRestAPI
 
                 try
                 {
-                    var now = DateTime.UtcNow;
-                    List<string> roomsToRemove = [];
-
-                    lock (_emptyRoomsLock)
-                    {
-                        foreach (var (roomName, emptySince) in _emptyRoomSince)
-                        {
-                            if (now - emptySince >= timeout)
-                                roomsToRemove.Add(roomName);
-                        }
-                    }
-
-                    if (roomsToRemove.Count == 0)
-                        continue;
-
-                    RemoveRoomsByName(roomsToRemove);
+                    CleanupEmptyRooms(DateTime.UtcNow, timeout);
                 }
                 catch (Exception e)
                 {
@@ -187,7 +173,7 @@ public static class HTTPRestAPI
     static bool TryGetRoomServer(string roomName, out RelayServer server)
     {
         string? endpoint;
-        lock (_roomToRegionLock)
+        lock (_roomsLock)
         {
             if (!_roomToServerEndpoint.TryGetValue(roomName, out endpoint))
             {
@@ -201,95 +187,68 @@ public static class HTTPRestAPI
 
     static void RemoveRoomsForServerEndpoint(string endpoint)
     {
-        List<string> roomsToRemove = [];
-
-        lock (_roomToRegionLock)
+        lock (_roomsLock)
         {
+            List<string> roomsToRemove = [];
             foreach (var room in _roomToServerEndpoint)
             {
                 if (string.Equals(room.Value, endpoint, StringComparison.Ordinal))
                     roomsToRemove.Add(room.Key);
             }
 
-            for (var i = 0; i < roomsToRemove.Count; i++)
-            {
-                _roomToServerEndpoint.Remove(roomsToRemove[i]);
-                _roomToRegion.Remove(roomsToRemove[i]);
-            }
+            foreach (var roomName in roomsToRemove)
+                RemoveRoomUnderLock(roomName);
         }
+    }
 
-        if (roomsToRemove.Count == 0)
+    static void TrackRoomPlayerCountUnderLock(string name, int count)
+    {
+        if (count == 0 && !_roomInstanceIds.ContainsKey(name))
+        {
+            _emptyRoomSince.TryAdd(name, DateTime.UtcNow);
             return;
+        }
 
-        RemoveEmptyRoomTracking(roomsToRemove);
+        _emptyRoomSince.Remove(name);
+    }
 
-        lock (_roomsLock)
+    static void RemoveRoomUnderLock(string name)
+    {
+        _roomToRegion.Remove(name);
+        _roomToServerEndpoint.Remove(name);
+        _roomInstanceIds.Remove(name);
+        _roomCountSequences.Remove(name);
+        _emptyRoomSince.Remove(name);
+        for (var i = _rooms.Count - 1; i >= 0; i--)
         {
-            for (var i = _rooms.Count - 1; i >= 0; i--)
-            {
-                if (roomsToRemove.Contains(_rooms[i].name))
-                    _rooms.RemoveAt(i);
-            }
+            if (_rooms[i].name == name)
+                _rooms.RemoveAt(i);
         }
     }
 
-    static void TrackRoomPlayerCount(string name, int count)
+    internal static int CleanupEmptyRooms(DateTime now, TimeSpan timeout)
     {
-        lock (_emptyRoomsLock)
-        {
-            if (count <= 0)
-            {
-                _emptyRoomSince.TryAdd(name, DateTime.UtcNow);
-                return;
-            }
-
-            _emptyRoomSince.Remove(name);
-        }
-    }
-
-    static void RemoveEmptyRoomTracking(IReadOnlyCollection<string> roomNames)
-    {
-        lock (_emptyRoomsLock)
-        {
-            foreach (var roomName in roomNames)
-                _emptyRoomSince.Remove(roomName);
-        }
-    }
-
-    static void RemoveRoomsByName(IReadOnlyCollection<string> roomNames)
-    {
-        if (roomNames.Count == 0)
-            return;
-
         List<string> removedRooms = [];
-
-        lock (_roomToRegionLock)
-        {
-            foreach (var roomName in roomNames)
-            {
-                if (!_roomToRegion.Remove(roomName, out _))
-                    continue;
-
-                _roomToServerEndpoint.Remove(roomName);
-                removedRooms.Add(roomName);
-            }
-        }
-
-        if (removedRooms.Count == 0)
-            return;
-
-        RemoveEmptyRoomTracking(removedRooms);
-
         lock (_roomsLock)
         {
-            for (var i = _rooms.Count - 1; i >= 0; i--)
+            foreach (var room in _rooms)
             {
-                if (removedRooms.Contains(_rooms[i].name))
-                    _rooms.RemoveAt(i);
+                if (!_roomInstanceIds.ContainsKey(room.name) &&
+                    room.connectedPlayers == 0 &&
+                    _emptyRoomSince.TryGetValue(room.name, out var emptySince) &&
+                    now - emptySince >= timeout)
+                {
+                    removedRooms.Add(room.name);
+                }
             }
+
+            foreach (var roomName in removedRooms)
+                RemoveRoomUnderLock(roomName);
         }
 
-        Console.WriteLine($"Removed {removedRooms.Count} empty room(s): {string.Join(", ", removedRooms)}");
+        if (removedRooms.Count > 0)
+            Console.WriteLine($"Removed {removedRooms.Count} empty room(s): {string.Join(", ", removedRooms)}");
+        return removedRooms.Count;
     }
 
     public static async Task<ApiResponse> OnRequest(HttpRequestBase req)
@@ -527,6 +486,8 @@ public static class HTTPRestAPI
     {
         var name = req.RetrieveHeaderValue("name");
         var internalSecret = req.RetrieveHeaderValue("internal_key_secret");
+        var relayEndpoint = req.RetrieveHeaderValue("relay_endpoint");
+        var instanceId = req.RetrieveHeaderValue("room_instance_id");
 
         if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(internalSecret))
             throw new Exception("PurrBalancer_unregisterRoom: Invalid headers");
@@ -534,32 +495,31 @@ public static class HTTPRestAPI
         if (!string.Equals(internalSecret, Program.SECRET_INTERNAL))
             throw new Exception("PurrBalancer: Invalid internal secret");
 
-        lock (_roomToRegionLock)
-        {
-            if (!_roomToRegion.Remove(name, out _))
-                throw new Exception("PurrBalancer: Room not found");
-
-            _roomToServerEndpoint.Remove(name);
-        }
-
-        RemoveEmptyRoomTracking(new[] { name });
-
         lock (_roomsLock)
         {
-            for (var i = 0; i < _rooms.Count; i++)
-            {
-                if (_rooms[i].name == name)
-                {
-                    _rooms.RemoveAt(i);
-                    break;
-                }
-            }
+            if (MatchesRoomOwnerUnderLock(name, relayEndpoint, instanceId))
+                RemoveRoomUnderLock(name);
         }
 
-        return new ApiResponse(new JObject
+        return RoomMutationAccepted();
+    }
+
+    static ApiResponse RoomMutationAccepted() => new(new JObject { ["status"] = "ok" });
+
+    static bool MatchesRoomOwnerUnderLock(string name, string? relayEndpoint, string? instanceId)
+    {
+        if (!_roomToServerEndpoint.TryGetValue(name, out var currentEndpoint))
+            return false;
+
+        if (_roomInstanceIds.TryGetValue(name, out var currentInstanceId))
         {
-            ["status"] = "ok"
-        });
+            return string.Equals(currentInstanceId, instanceId, StringComparison.Ordinal) &&
+                   string.Equals(currentEndpoint, relayEndpoint, StringComparison.Ordinal);
+        }
+
+        return string.IsNullOrEmpty(instanceId) &&
+               (string.IsNullOrEmpty(relayEndpoint) ||
+                string.Equals(currentEndpoint, relayEndpoint, StringComparison.Ordinal));
     }
 
     private static ApiResponse UpdateConnectionCount(HttpRequestBase req)
@@ -567,26 +527,40 @@ public static class HTTPRestAPI
         var name = req.RetrieveHeaderValue("name");
         var internalSecret = req.RetrieveHeaderValue("internal_key_secret");
         var count = req.RetrieveHeaderValue("count");
+        var relayEndpoint = req.RetrieveHeaderValue("relay_endpoint");
+        var instanceId = req.RetrieveHeaderValue("room_instance_id");
 
         if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(internalSecret))
-            throw new Exception("PurrBalancer_unregisterRoom: Invalid headers");
+            throw new Exception("PurrBalancer_updateConnectionCount: Invalid headers");
 
         if (!string.Equals(internalSecret, Program.SECRET_INTERNAL))
             throw new Exception("PurrBalancer: Invalid internal secret");
 
-        if (!int.TryParse(count, out var countNumber))
+        if (!int.TryParse(count, NumberStyles.Integer, CultureInfo.InvariantCulture, out var countNumber) || countNumber < 0)
             throw new Exception("PurrBalancer: Invalid count");
-
-        lock (_roomToRegionLock)
-        {
-            if (!_roomToRegion.ContainsKey(name))
-                throw new Exception("PurrBalancer: Room not found");
-        }
-
-        TrackRoomPlayerCount(name, countNumber);
 
         lock (_roomsLock)
         {
+            if (!MatchesRoomOwnerUnderLock(name, relayEndpoint, instanceId))
+                return RoomMutationAccepted();
+
+            if (_roomInstanceIds.ContainsKey(name))
+            {
+                var sequenceHeader = req.RetrieveHeaderValue("count_sequence");
+                if (!long.TryParse(sequenceHeader, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sequence) ||
+                    sequence < 0)
+                {
+                    throw new Exception("PurrBalancer: Invalid count sequence");
+                }
+
+                if (sequence <= _roomCountSequences[name])
+                    return RoomMutationAccepted();
+
+                _roomCountSequences[name] = sequence;
+            }
+
+            TrackRoomPlayerCountUnderLock(name, countNumber);
+
             for (var i = 0; i < _rooms.Count; i++)
             {
                 var room = _rooms[i];
@@ -599,10 +573,7 @@ public static class HTTPRestAPI
             }
         }
 
-        return new ApiResponse(new JObject
-        {
-            ["status"] = "ok"
-        });
+        return RoomMutationAccepted();
     }
 
     private static ApiResponse RegisterRoom(HttpRequestBase req)
@@ -610,6 +581,9 @@ public static class HTTPRestAPI
         var region = req.RetrieveHeaderValue("region");
         var name = req.RetrieveHeaderValue("name");
         var relayEndpoint = req.RetrieveHeaderValue("relay_endpoint");
+        var instanceId = req.RetrieveHeaderValue("room_instance_id");
+        var previousInstanceId = req.RetrieveHeaderValue("previous_room_instance_id");
+        var relayInstanceId = req.RetrieveHeaderValue("relay_instance_id");
         var internalSecret = req.RetrieveHeaderValue("internal_key_secret");
 
         if (string.IsNullOrEmpty(region) || string.IsNullOrEmpty(name) || string.IsNullOrEmpty(internalSecret))
@@ -618,44 +592,75 @@ public static class HTTPRestAPI
         if (!string.Equals(internalSecret, Program.SECRET_INTERNAL))
             throw new Exception("PurrBalancer: Invalid internal secret");
 
-        RelayServer server;
-        if (!string.IsNullOrEmpty(relayEndpoint))
+        lock (_relayServers)
         {
-            if (!TryGetServerByEndpoint(relayEndpoint, out server))
-                throw new Exception("PurrBalancer: Invalid relay endpoint when registering room");
-
-            if (!string.Equals(server.region, region, StringComparison.Ordinal))
-                throw new Exception("PurrBalancer: Relay endpoint region mismatch when registering room");
-        }
-        else if (!TryGetServer(region, out server))
-        {
-            throw new Exception("PurrBalancer: Invalid region when registering room");
-        }
-
-        lock (_roomToRegionLock)
-        {
-            if (!_roomToRegion.TryAdd(name, region))
-                throw new Exception("PurrBalancer: Room already registered");
-
-            _roomToServerEndpoint.Add(name, server.apiEndpoint);
-        }
-
-        TrackRoomPlayerCount(name, 0);
-
-        lock (_roomsLock)
-        {
-            _rooms.Add(new RoomInfo
+            RelayServer server;
+            if (!string.IsNullOrEmpty(relayEndpoint))
             {
-                name = name,
-                region = region,
-                connectedPlayers = 0
-            });
+                if (!TryGetServerByEndpoint(relayEndpoint, out server))
+                    throw new Exception("PurrBalancer: Invalid relay endpoint when registering room");
+
+                if (!string.Equals(server.region, region, StringComparison.Ordinal))
+                    throw new Exception("PurrBalancer: Relay endpoint region mismatch when registering room");
+            }
+            else if (!TryGetServer(region, out server))
+            {
+                throw new Exception("PurrBalancer: Invalid region when registering room");
+            }
+
+            if (!string.IsNullOrEmpty(server.instanceId) &&
+                !string.Equals(server.instanceId, relayInstanceId, StringComparison.Ordinal))
+            {
+                return ApiResponse.FromError("PurrBalancer: Relay instance changed", HttpStatusCode.Conflict);
+            }
+
+            lock (_roomsLock)
+            {
+                if (_roomToServerEndpoint.TryGetValue(name, out var existingEndpoint))
+                {
+                    var sameEndpoint = string.Equals(existingEndpoint, server.apiEndpoint, StringComparison.Ordinal);
+                    var existingIsVersioned = _roomInstanceIds.TryGetValue(name, out var existingInstanceId);
+                    var newIsVersioned = !string.IsNullOrEmpty(instanceId);
+
+                    if (sameEndpoint && existingIsVersioned &&
+                        string.Equals(existingInstanceId, instanceId, StringComparison.Ordinal))
+                    {
+                        return RoomMutationAccepted();
+                    }
+
+                    var replacesExpectedInstance = existingIsVersioned &&
+                        string.Equals(existingInstanceId, previousInstanceId, StringComparison.Ordinal);
+                    var upgradesEmptyLegacyRoom = !existingIsVersioned &&
+                        _rooms.Exists(room => room.name == name && room.connectedPlayers == 0);
+
+                    if (!sameEndpoint || !newIsVersioned ||
+                        (!replacesExpectedInstance && !upgradesEmptyLegacyRoom))
+                    {
+                        return ApiResponse.FromError("PurrBalancer: Room already registered", HttpStatusCode.Conflict);
+                    }
+
+                    RemoveRoomUnderLock(name);
+                }
+
+                _roomToRegion.Add(name, region);
+                _roomToServerEndpoint.Add(name, server.apiEndpoint);
+                if (!string.IsNullOrEmpty(instanceId))
+                {
+                    _roomInstanceIds.Add(name, instanceId);
+                    _roomCountSequences.Add(name, -1);
+                }
+
+                TrackRoomPlayerCountUnderLock(name, 0);
+                _rooms.Add(new RoomInfo
+                {
+                    name = name,
+                    region = region,
+                    connectedPlayers = 0
+                });
+            }
         }
 
-        return new ApiResponse(new JObject
-        {
-            ["status"] = "ok"
-        });
+        return RoomMutationAccepted();
     }
 
     private static ApiResponse RegisterServer(HttpRequestBase req)
@@ -672,10 +677,34 @@ public static class HTTPRestAPI
 
         lock (_relayServers)
         {
+            if (!string.IsNullOrEmpty(server.instanceId))
+            {
+                if (_retiredRelayInstanceIds.TryGetValue(server.apiEndpoint, out var retiredInstances) &&
+                    retiredInstances.Contains(server.instanceId))
+                {
+                    return RoomMutationAccepted();
+                }
+
+                if (_lastRelayInstanceIds.TryGetValue(server.apiEndpoint, out var previousInstanceId) &&
+                    !string.Equals(previousInstanceId, server.instanceId, StringComparison.Ordinal))
+                {
+                    if (retiredInstances == null)
+                    {
+                        retiredInstances = new HashSet<string>(StringComparer.Ordinal);
+                        _retiredRelayInstanceIds.Add(server.apiEndpoint, retiredInstances);
+                    }
+                    retiredInstances.Add(previousInstanceId);
+                }
+
+                _lastRelayInstanceIds[server.apiEndpoint] = server.instanceId;
+            }
+
             for (var i = 0; i < _relayServers.Count; i++)
             {
                 if (string.Equals(_relayServers[i].apiEndpoint, server.apiEndpoint, StringComparison.Ordinal))
                 {
+                    if (!string.Equals(_relayServers[i].instanceId, server.instanceId, StringComparison.Ordinal))
+                        RemoveRoomsForServerEndpoint(server.apiEndpoint);
                     _relayServers[i] = server;
                     return new ApiResponse(new JObject
                     {
@@ -706,22 +735,24 @@ public static class HTTPRestAPI
         var body = req.DataAsString;
         var server = JObject.Parse(body).ToObject<RelayServer>();
 
-        var removedServer = false;
         lock (_relayServers)
         {
             for (var i = 0; i < _relayServers.Count; i++)
             {
                 if (string.Equals(_relayServers[i].apiEndpoint, server.apiEndpoint, StringComparison.Ordinal))
                 {
+                    if (!string.IsNullOrEmpty(_relayServers[i].instanceId) &&
+                        !string.Equals(_relayServers[i].instanceId, server.instanceId, StringComparison.Ordinal))
+                    {
+                        return RoomMutationAccepted();
+                    }
+
                     _relayServers.RemoveAt(i);
-                    removedServer = true;
+                    RemoveRoomsForServerEndpoint(server.apiEndpoint);
                     break;
                 }
             }
         }
-
-        if (removedServer)
-            RemoveRoomsForServerEndpoint(server.apiEndpoint);
 
         return new ApiResponse(new JObject
         {
@@ -732,7 +763,7 @@ public static class HTTPRestAPI
     private static ApiResponse GetTotalConnections(HttpRequestBase req)
     {
         int totalConnections = 0;
-        
+
         lock (_roomsLock)
         {
             for (var i = 0; i < _rooms.Count; i++)
@@ -740,7 +771,7 @@ public static class HTTPRestAPI
                 totalConnections += _rooms[i].connectedPlayers;
             }
         }
-        
+
         return new ApiResponse(JObject.FromObject(new
         {
             totalConnections = totalConnections

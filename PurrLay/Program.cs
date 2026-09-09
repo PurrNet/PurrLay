@@ -12,6 +12,7 @@ namespace PurrLay;
 internal static class Program
 {
     public static string SECRET_INTERNAL { get; private set; } = "PURRNET";
+    internal static readonly string ProcessInstanceId = Guid.NewGuid().ToString("N");
 
     private static async Task HandleRouting(HttpContextBase context)
     {
@@ -48,6 +49,7 @@ internal static class Program
     [UsedImplicitly]
     struct RelayServer
     {
+        [UsedImplicitly] public string instanceId;
         [UsedImplicitly] public string apiEndpoint;
         [UsedImplicitly] public string host;
         [UsedImplicitly] public int udpPort;
@@ -102,6 +104,7 @@ internal static class Program
 
             var server = new RelayServer
             {
+                instanceId = ProcessInstanceId,
                 apiEndpoint = GetRelayEndpoint(),
                 host = domain,
                 udpPort = UDP_PORT,

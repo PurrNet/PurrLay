@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Net;
-using System.Text;
 using Newtonsoft.Json.Linq;
 using PurrBalancer;
 using WatsonWebserver.Core;
@@ -72,7 +71,7 @@ public static class HTTPRestAPI
         }
     }
 
-    public static async Task RegisterRoom(string region, string roomName)
+    public static async Task RegisterRoom(string region, string roomName, string? instanceId = null, string? previousInstanceId = null)
     {
         if (!Env.TryGetValue("BALANCER_URL", out var balancerUrl))
             throw new Exception("Missing `BALANCER_URL` env variable");
@@ -82,20 +81,23 @@ public static class HTTPRestAPI
         client.DefaultRequestHeaders.Add("name", roomName);
         client.DefaultRequestHeaders.Add("region", region);
         client.DefaultRequestHeaders.Add("relay_endpoint", Program.GetRelayEndpoint());
+        client.DefaultRequestHeaders.Add("relay_instance_id", Program.ProcessInstanceId);
+        if (instanceId != null)
+            client.DefaultRequestHeaders.Add("room_instance_id", instanceId);
+        if (previousInstanceId != null)
+            client.DefaultRequestHeaders.Add("previous_room_instance_id", previousInstanceId);
         client.DefaultRequestHeaders.Add("internal_key_secret", Program.SECRET_INTERNAL);
 
-        var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+        using var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get,
             $"{balancerUrl}/registerRoom"));
 
         if (!response.IsSuccessStatusCode)
         {
-            var content = response.Content.ReadAsByteArrayAsync();
-            var contentStr = Encoding.UTF8.GetString(content.Result);
-            throw new Exception(contentStr);
+            throw new Exception(await response.Content.ReadAsStringAsync());
         }
     }
 
-    public static async Task unegisterRoom(string roomName)
+    public static async Task unegisterRoom(string roomName, string? instanceId = null)
     {
         if (!Env.TryGetValue("BALANCER_URL", out var balancerUrl))
             throw new Exception("Missing `BALANCER_URL` env variable");
@@ -103,20 +105,21 @@ public static class HTTPRestAPI
         using HttpClient client = new();
 
         client.DefaultRequestHeaders.Add("name", roomName);
+        client.DefaultRequestHeaders.Add("relay_endpoint", Program.GetRelayEndpoint());
+        if (instanceId != null)
+            client.DefaultRequestHeaders.Add("room_instance_id", instanceId);
         client.DefaultRequestHeaders.Add("internal_key_secret", Program.SECRET_INTERNAL);
 
-        var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+        using var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get,
             $"{balancerUrl}/unregisterRoom"));
 
         if (!response.IsSuccessStatusCode)
         {
-            var content = response.Content.ReadAsByteArrayAsync();
-            var contentStr = Encoding.UTF8.GetString(content.Result);
-            throw new Exception(contentStr);
+            throw new Exception(await response.Content.ReadAsStringAsync());
         }
     }
 
-    public static async Task updateConnectionCount(string roomName, int newCount)
+    public static async Task updateConnectionCount(string roomName, int newCount, string? instanceId = null, long countSequence = 0)
     {
         if (!Env.TryGetValue("BALANCER_URL", out var balancerUrl))
             throw new Exception("Missing `BALANCER_URL` env variable");
@@ -124,17 +127,21 @@ public static class HTTPRestAPI
         using HttpClient client = new();
 
         client.DefaultRequestHeaders.Add("name", roomName);
+        client.DefaultRequestHeaders.Add("relay_endpoint", Program.GetRelayEndpoint());
+        if (instanceId != null)
+        {
+            client.DefaultRequestHeaders.Add("room_instance_id", instanceId);
+            client.DefaultRequestHeaders.Add("count_sequence", countSequence.ToString(CultureInfo.InvariantCulture));
+        }
         client.DefaultRequestHeaders.Add("internal_key_secret", Program.SECRET_INTERNAL);
         client.DefaultRequestHeaders.Add("count", newCount.ToString());
 
-        var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get,
+        using var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get,
             $"{balancerUrl}/updateConnectionCount"));
 
         if (!response.IsSuccessStatusCode)
         {
-            var content = response.Content.ReadAsByteArrayAsync();
-            var contentStr = Encoding.UTF8.GetString(content.Result);
-            throw new Exception(contentStr);
+            throw new Exception(await response.Content.ReadAsStringAsync());
         }
     }
 
