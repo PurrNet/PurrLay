@@ -307,7 +307,16 @@ class Fly:
         return self.call("POST", f"/apps/{app}/machines/{machine_id}/{action}", body)
 
     def tag(self, app, machine_id, key, value):
-        self.action(app, machine_id, f"metadata/{key}", {"value": str(value)})
+        for attempt in range(5):
+            try:
+                return self.action(app, machine_id, f"metadata/{key}", {"value": str(value)})
+            except HttpError as error:
+                if error.status != 429 or attempt == 4:
+                    raise
+                delay = 2 ** attempt
+                print(f"Fly rate limit updating metadata on {app}/{machine_id}; "
+                      f"retrying in {delay}s ({attempt + 1}/4)")
+                time.sleep(delay)
 
     def ensure_volume(self, app, deployment, region):
         name = volume_name(deployment)

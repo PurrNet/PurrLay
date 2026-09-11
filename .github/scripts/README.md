@@ -81,7 +81,10 @@ The same report is printed in the log and saved as Markdown and JSON in the
 when cleanup raises an error, with unvisited apps and Machines marked as not
 checked. A runner being forcibly terminated may prevent the final report write.
 A successful workflow can keep Machines; **Needs review** identifies API failures
-or missing proof, including rate limits that can be retried on the next run.
+or missing proof. Metadata updates retry HTTP 429 responses up to four times,
+waiting 1, 2, 4 and 8 seconds. If the limit persists, the Machine stays for a later
+cleanup run. Other failures are not retried by this metadata retry loop. Retirement
+still rechecks the process identity and retirement proof before stopping a Machine.
 
 Two Machines in a region commonly mean an active generation plus a draining or
 legacy predecessor. Managed predecessors retire automatically once empty. Legacy
