@@ -529,7 +529,9 @@ def find_predecessor(fly, admin, app, exclude=None, open_tunnel=tunnel):
 def initial_legacy_predecessor(fly, admin, args):
     machines = fly.machines(args.app)
     if any(metadata(machine).get("purr_owner") == OWNER for machine in machines):
-        raise DeploymentError("Initial legacy cutover requires zero existing owned generations, including stopped Machines")
+        raise DeploymentError("Initial legacy cutover is only for the first migration; managed generations already exist "
+                              "(including stopped Machines). Rerun Deploy Purr Transport with initial_legacy_cutover "
+                              "disabled. Do not delete existing generations to bypass this check.")
     candidates = [machine for machine in machines if machine["state"] == "started" and
                   any(service.get("internal_port") == 8080
                       for service in machine.get("config", {}).get("services", []))]

@@ -132,6 +132,7 @@ public sealed class BalancerRecoveryTests
         private readonly ConcurrentQueue<string> _output = new();
         private readonly DirectoryInfo _directory = Directory.CreateTempSubdirectory("purr-balancer-recovery-");
         private readonly bool _ownsState;
+        private volatile bool _listening;
         public int Port { get; }
         public string Endpoint => $"http://127.0.0.1:{Port}";
         public string StatePath { get; }
@@ -174,6 +175,7 @@ public sealed class BalancerRecoveryTests
         {
             if (line == null) return;
             _output.Enqueue(line);
+            if (line == $"Listening on {Endpoint}/") _listening = true;
             while (_output.Count > 100) _output.TryDequeue(out _);
         }
 
@@ -183,6 +185,13 @@ public sealed class BalancerRecoveryTests
             while (DateTime.UtcNow < deadline)
             {
                 Assert.False(_process.HasExited, string.Join('\n', _output));
+                // .NET 8 HttpListener can accept before its constructor has initialized
+                // connection tracking. Probe only after Start has returned in the child.
+                if (!_listening)
+                {
+                    await Task.Delay(40);
+                    continue;
+                }
                 try
                 {
                     var status = await JsonAsync(Endpoint, "/admin/status");

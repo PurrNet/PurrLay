@@ -8,6 +8,11 @@ old room discovery and reconnect information is lost. The old balancer is stoppe
 and retained after its replacement is ready. Leave this option disabled for later
 deployments, which require a successful private IPv6 state handoff.
 
+This option does not repair a failed deployment or change which tests run. If a
+run fails in the test steps, fix that failure and retry with the option disabled.
+Once managed generations exist, enabling it is rejected; existing Machines do not
+need to be removed to make a normal deployment work.
+
 Run **Deploy Purr Transport** from GitHub Actions. It runs the .NET session/recovery tests, Python deployment tests, and Linux IPv6 image smoke test before any Fly operations, then builds images, creates unmanaged Machines, hands off the balancer registry, and directs new rooms to the new relay generation. It does not update existing relay Machines or change their IP addresses. **Retire drained Purr Transport generations** runs every five minutes and can also be run manually. Both workflows share a concurrency group and never cancel an in-progress deployment or cleanup. `queue: max` also keeps scheduled cleanup from replacing a pending deployment in GitHub's default single-entry queue.
 
 The existing `purrtransport` app and its seven regional apps must already exist in the same Fly organization/private network. The workflows reuse `FLY_API_TOKEN`, `PURR_APP_SECRET`, `CLOUDFLARE_API_TOKEN`, and `CLOUDFLARE_ZONE_ID`. The token needs Machine, volume, certificate, IP and image-registry permissions for these apps, plus private-network access for `flyctl proxy`. Missing apps or conflicting DNS fail closed; the script does not choose an organization or repoint an existing hostname.

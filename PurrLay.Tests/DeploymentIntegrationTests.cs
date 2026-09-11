@@ -228,12 +228,15 @@ public sealed class DeploymentIntegrationTests
         readonly ConcurrentQueue<string> _output = new();
         readonly DirectoryInfo _workingDirectory = Directory.CreateTempSubdirectory("purrlay-deployment-test-");
         readonly bool _ownsState;
+        readonly bool _waitForListener;
+        volatile bool _listening;
         public string Endpoint { get; }
         public int WebSocketPort { get; }
         public string? StatePath { get; }
 
         Child(string project, string deployment, string balancer, string? predecessor, string? statePath = null)
         {
+            _waitForListener = project == "PurrBalancer";
             var port = Port();
             Endpoint = $"http://127.0.0.1:{port}";
             WebSocketPort = Port();
@@ -288,6 +291,7 @@ public sealed class DeploymentIntegrationTests
         {
             if (line == null) return;
             _output.Enqueue(line);
+            if (line == $"Listening on {Endpoint}/") _listening = true;
             while (_output.Count > 150) _output.TryDequeue(out _);
         }
 
@@ -299,6 +303,9 @@ public sealed class DeploymentIntegrationTests
                 await WaitAsync(async () =>
                 {
                     Assert.False(_process.HasExited, string.Join('\n', _output));
+                    // Avoid probing inside the managed HttpListener constructor;
+                    // the balancer emits this marker only after Start returns.
+                    if (_waitForListener && !_listening) return false;
                     try
                     {
                         using var response = await RequestAsync(Endpoint, "/admin/status");

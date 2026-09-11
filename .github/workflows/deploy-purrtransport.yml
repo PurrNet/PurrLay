@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       initial_legacy_cutover:
-        description: 'One-time legacy cutover: discard old balancer directory; keep regional relays running'
+        description: 'First migration only: discard legacy room directory. Leave OFF for normal deployments.'
         type: boolean
         default: false
 
