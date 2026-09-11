@@ -492,8 +492,15 @@ def status_ready(admin, endpoint, deployment=None, host=None):
 
 
 def find_predecessor(fly, admin, app, exclude=None, open_tunnel=tunnel):
+    machines = fly.machines(app)
+    managed = [machine for machine in machines if machine["id"] != exclude and owned(machine, "balancer")]
+    if managed:
+        for machine in machines:
+            if machine["id"] != exclude and not owned(machine, "balancer"):
+                print(f"Retaining unmanaged Machine {app}/{machine['id']}; not a predecessor candidate "
+                      "while managed balancer generations exist")
     leaders, legacy = [], []
-    for machine in fly.machines(app):
+    for machine in managed if managed else machines:
         if machine["id"] == exclude or machine["state"] != "started":
             continue
         if not any(s.get("internal_port") == 8080 for s in machine.get("config", {}).get("services", [])):
@@ -518,10 +525,11 @@ def find_predecessor(fly, admin, app, exclude=None, open_tunnel=tunnel):
                 "an IPv4-only listener is insufficient. Verify that listener and private connectivity before retrying. "
                 f"No successor was created; preserving all Machines. Original error: {error}") from error
     if len(leaders) == 1:
+        print(f"Authoritative predecessor {app}/{leaders[0]['id']}")
         return leaders[0]
-    if not leaders and len(legacy) == 1:
+    if not managed and not leaders and len(legacy) == 1:
         return legacy[0]
-    if not leaders and not legacy and not fly.machines(app):
+    if not leaders and not legacy and not machines:
         return None
     raise DeploymentError("Cannot identify exactly one authoritative predecessor; preserving all Machines")
 

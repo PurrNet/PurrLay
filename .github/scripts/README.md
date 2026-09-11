@@ -54,6 +54,13 @@ propagating and the proxy exits, it starts a fresh proxy within a bounded startu
 deadline. Exhausting that deadline retains the candidate and its volume for a
 retry; it does not replace the candidate or stop the predecessor.
 
+Once managed balancer generations exist, predecessor selection checks those
+generations for exactly one ready authority. Retained unmanaged legacy Machines
+are logged and excluded from those probes; an old IPv4-only listener cannot
+block a handoff between managed generations. Unreachable or ambiguous managed
+generations still block deployment, with no fallback to a legacy directory.
+Legacy dependencies remain part of the transferred state and are not stopped.
+
 Each new balancer generation has a dedicated encrypted 1 GB Fly volume mounted at `/data`; `BALANCER_STATE_PATH` stores its checkpoint there. A process restart uses that checkpoint. A retry for an already-created generation reuses its Machine and attached volume; an uncertain volume or Machine create is reconciled by its deterministic generation name before another mutation is considered.
 
 The explicit initial cutover requires exactly one started unowned balancer and no owned generation, including stopped Machines. It verifies that exact public Machine returns a missing admin API and a valid, unambiguous relay registry. It records the cutover mode, predecessor ID and image on the candidate before creation. Only after the new private and public probes pass does it cordon and stop that exact unchanged legacy balancer. There is no legacy directory dependency in the new checkpoint. Old relays register with the new balancer on their next heartbeat, so its regional list can briefly be empty. New rooms then use the new directory while the regional rollout replaces their allocation targets.

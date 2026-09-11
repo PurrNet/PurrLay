@@ -421,6 +421,103 @@ class PruneTests(unittest.TestCase):
         self.assertEqual(fly.events[-1], ("destroy", "old"))
 
 
+class ManagedPredecessorTests(unittest.TestCase):
+    def setUp(self):
+        self.legacy = balancer("legacy")
+        self.legacy["config"]["metadata"] = {}
+        self.opened = []
+        self.output = io.StringIO()
+        self.capture = contextlib.redirect_stdout(self.output)
+        self.capture.__enter__()
+
+    def tearDown(self):
+        self.capture.__exit__(None, None, None)
+
+    @contextlib.contextmanager
+    def managed_tunnel(self, app, machine_id):
+        self.assertEqual(app, "app")
+        self.assertNotEqual(machine_id, "legacy", "Managed selection must never probe the IPv4-only legacy balancer")
+        self.opened.append(machine_id)
+        yield "private:" + machine_id
+
+    def assert_unchanged(self, fly, original, admin):
+        self.assertEqual(fly.items, original)
+        self.assertEqual(fly.events, [])
+        self.assertEqual(admin.events, [])
+
+    def test_healthy_managed_leader_ignores_ipv4_only_legacy_in_any_inventory_order(self):
+        leader = balancer("leader")
+        for machines in ([self.legacy, leader], [leader, self.legacy]):
+            with self.subTest(first=machines[0]["id"]):
+                self.opened.clear()
+                fly = FakeFly(machines)
+                original = copy.deepcopy(fly.items)
+                admin = FakeAdmin({"private:leader": {"ready": True, "successorUrl": None},
+                                   "private:legacy": OSError("IPv4-only legacy connection reset")})
+                selected = g.find_predecessor(fly, admin, "app", open_tunnel=self.managed_tunnel)
+                self.assertEqual(selected["id"], "leader")
+                self.assertEqual(self.opened, ["leader"])
+                self.assertEqual(admin.hosts, [("private:leader", "leader.vm.app.internal:8080")])
+                self.assert_unchanged(fly, original, admin)
+
+    def test_forwarding_managed_generation_is_not_selected_over_live_authority(self):
+        fly = FakeFly([self.legacy, balancer("forwarder", "draining"), balancer("leader")])
+        original = copy.deepcopy(fly.items)
+        admin = FakeAdmin({"private:forwarder": {"ready": True, "successorUrl": "private:leader"},
+                           "private:leader": {"ready": True}})
+        selected = g.find_predecessor(fly, admin, "app", open_tunnel=self.managed_tunnel)
+        self.assertEqual(selected["id"], "leader")
+        self.assertEqual(self.opened, ["forwarder", "leader"])
+        self.assert_unchanged(fly, original, admin)
+
+    def test_unreachable_managed_generation_cannot_fall_back_to_healthy_legacy(self):
+        for error in (g.DeploymentError("private endpoint unavailable"), OSError("connection reset"),
+                      g.HttpError(404, "private:managed")):
+            with self.subTest(error=type(error).__name__):
+                self.opened.clear()
+                fly = FakeFly([self.legacy, balancer("managed")])
+                original = copy.deepcopy(fly.items)
+                admin = FakeAdmin({"private:managed": error, "private:legacy": {"ready": True}})
+                with self.assertRaises(g.DeploymentError):
+                    g.find_predecessor(fly, admin, "app", open_tunnel=self.managed_tunnel)
+                self.assertEqual(self.opened, ["managed"])
+                self.assert_unchanged(fly, original, admin)
+
+    def test_stopped_managed_generation_prevents_legacy_fallback(self):
+        stopped = balancer("managed")
+        stopped["state"] = "stopped"
+        fly = FakeFly([self.legacy, stopped])
+        original = copy.deepcopy(fly.items)
+        admin = FakeAdmin({"private:legacy": {"ready": True}})
+        with self.assertRaises(g.DeploymentError):
+            g.find_predecessor(fly, admin, "app", open_tunnel=self.managed_tunnel)
+        self.assertEqual(self.opened, [])
+        self.assertEqual(admin.hosts, [])
+        self.assert_unchanged(fly, original, admin)
+
+    def test_two_managed_authorities_fail_without_consulting_legacy(self):
+        fly = FakeFly([self.legacy, balancer("one"), balancer("two")])
+        original = copy.deepcopy(fly.items)
+        admin = FakeAdmin({"private:one": {"ready": True}, "private:two": {"ready": True},
+                           "private:legacy": {"ready": True}})
+        with self.assertRaises(g.DeploymentError):
+            g.find_predecessor(fly, admin, "app", open_tunnel=self.managed_tunnel)
+        self.assertEqual(self.opened, ["one", "two"])
+        self.assert_unchanged(fly, original, admin)
+
+    def test_no_managed_authority_fails_without_consulting_legacy(self):
+        for candidate in ({"ready": False}, {"ready": True, "successorUrl": "private:missing-successor"}):
+            with self.subTest(status=candidate):
+                self.opened.clear()
+                fly = FakeFly([self.legacy, balancer("managed")])
+                original = copy.deepcopy(fly.items)
+                admin = FakeAdmin({"private:managed": candidate, "private:legacy": {"ready": True}})
+                with self.assertRaises(g.DeploymentError):
+                    g.find_predecessor(fly, admin, "app", open_tunnel=self.managed_tunnel)
+                self.assertEqual(self.opened, ["managed"])
+                self.assert_unchanged(fly, original, admin)
+
+
 class DeploymentTests(unittest.TestCase):
     def relay_args(self):
         return types.SimpleNamespace(app="app", deployment="new", image="image", region="cdg",
