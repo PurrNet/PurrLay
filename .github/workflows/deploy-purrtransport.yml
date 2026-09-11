@@ -1,245 +1,112 @@
-name: Deploy Purr Balancer
+name: Deploy Purr Transport
 
 on:
   workflow_dispatch:
+    inputs:
+      initial_legacy_cutover:
+        description: 'One-time legacy cutover: discard old balancer directory; keep regional relays running'
+        type: boolean
+        default: false
+
+concurrency:
+  group: purrtransport-production-generations
+  queue: max
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   APP_NAME: purrtransport
   APP_DOMAIN: purrservers.com
-  APP_SECRET: ${{ secrets.PURR_APP_SECRET }}
   BAL_REGION: cdg
+  DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+  APP_SECRET: ${{ secrets.PURR_APP_SECRET }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
 
 jobs:
-  # -------------------
-  # Balancer
-  # -------------------
   balancer:
-    name: Build Balancer
+    name: Deploy balancer with live state handoff
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Ensure app exists
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+      - name: Test session preservation and handoff recovery
+        run: dotnet test PurrLay.Tests/PurrLay.Tests.csproj --configuration Release --nologo
+      - name: Test deployment safeguards
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+      - name: Verify Linux private IPv6 handoff
         run: |
-          echo "Ensuring app $APP_NAME exists in region $BAL_REGION"
-          flyctl apps create $APP_NAME 2>/dev/null || echo "App $APP_NAME already exists"
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Deploy Balancer
+          docker build --file PurrBalancer/dockerfile --tag purrbalancer-ipv6-smoke:local PurrBalancer
+          docker pull golang:1.26
+          python3 PurrLay.Tests/balancer_ipv6_smoke.py --image purrbalancer-ipv6-smoke:local --probe-image golang:1.26
+      - name: Verify stable balancer network
+        run: >-
+          python3 .github/scripts/fly_generations.py network
+          --app "$APP_NAME" --domain "$APP_NAME.$APP_DOMAIN"
+      - name: Build and push balancer image without deploying
+        timeout-minutes: 15
         working-directory: PurrBalancer
+        run: >-
+          flyctl deploy --build-only --push --local-only
+          --app "$APP_NAME" --image-label "generation-$DEPLOYMENT_ID"
+      - name: Start successor, transfer authority and retain predecessor dependencies
+        env:
+          INITIAL_LEGACY_CUTOVER: ${{ inputs.initial_legacy_cutover }}
         run: |
-          flyctl deploy --remote-only --strategy immediate \
-            --app $APP_NAME \
-            --primary-region $BAL_REGION \
-            --env SECRET="${APP_SECRET}"
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Ensure cert exists
-        run: flyctl certs create "${APP_NAME}.${APP_DOMAIN}" --app $APP_NAME || true
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Force scale to 1
-        run: flyctl scale count 1 --app $APP_NAME --yes
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Update Cloudflare DNS (A + AAAA)
-        run: |
-          # IPv4
-          IP=$(flyctl ips list --app $APP_NAME --json | jq -r '.[] | select(.Type=="v4") | .Address')
-          echo "Updating A record for ${APP_NAME}.${APP_DOMAIN} -> $IP"
-
-          if [ -n "$IP" ]; then
-            RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records?type=A&name=${APP_NAME}.${APP_DOMAIN}" \
-              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-              -H "Content-Type: application/json" | jq -r '.result[0].id')
-
-            if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
-              echo "Creating new A record"
-              curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records" \
-                -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"A\",\"name\":\"${APP_NAME}.${APP_DOMAIN}\",\"content\":\"$IP\",\"ttl\":120,\"proxied\":false}" | jq .
-            else
-              echo "Updating existing A record $RECORD_ID"
-              curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records/$RECORD_ID" \
-                -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"A\",\"name\":\"${APP_NAME}.${APP_DOMAIN}\",\"content\":\"$IP\",\"ttl\":120,\"proxied\":false}" | jq .
-            fi
+          cutover_args=()
+          if [[ "$INITIAL_LEGACY_CUTOVER" == "true" ]]; then
+            cutover_args+=(--initial-legacy-cutover)
           fi
+          python3 .github/scripts/fly_generations.py balancer \
+            --app "$APP_NAME" --region "$BAL_REGION" --deployment "$DEPLOYMENT_ID" \
+            --image "registry.fly.io/$APP_NAME:generation-$DEPLOYMENT_ID" \
+            --public-url "https://$APP_NAME.$APP_DOMAIN" "${cutover_args[@]}"
 
-          # IPv6
-          IPV6=$(flyctl ips list --app $APP_NAME --json | jq -r '.[] | select(.Type=="v6") | .Address')
-          echo "Updating AAAA record for ${APP_NAME}.${APP_DOMAIN} -> $IPV6"
-
-          if [ -n "$IPV6" ]; then
-            RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records?type=AAAA&name=${APP_NAME}.${APP_DOMAIN}" \
-              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-              -H "Content-Type: application/json" | jq -r '.result[0].id')
-
-            if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
-              echo "Creating new AAAA record"
-              curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records" \
-                -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"AAAA\",\"name\":\"${APP_NAME}.${APP_DOMAIN}\",\"content\":\"$IPV6\",\"ttl\":120,\"proxied\":false}" | jq .
-            else
-              echo "Updating existing AAAA record $RECORD_ID"
-              curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records/$RECORD_ID" \
-                -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"AAAA\",\"name\":\"${APP_NAME}.${APP_DOMAIN}\",\"content\":\"$IPV6\",\"ttl\":120,\"proxied\":false}" | jq .
-            fi
-          fi
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-  # -------------------
-  # Relays
-  # -------------------
-  deploy:
-    name: Build Relay
-    runs-on: ubuntu-latest
+  relays:
+    name: Deploy relay (${{ matrix.prefix }})
     needs: balancer
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - region: cdg
-            prefix: france
-          - region: gru
-            prefix: brazil
-          - region: jnb
-            prefix: south-africa
-          - region: ewr
-            prefix: nj-us
-          - region: nrt
-            prefix: japan
-          - region: syd
-            prefix: australia
-          - region: hkg
-            prefix: china
-
+          - { region: cdg, prefix: france }
+          - { region: gru, prefix: brazil }
+          - { region: jnb, prefix: south-africa }
+          - { region: ewr, prefix: nj-us }
+          - { region: nrt, prefix: japan }
+          - { region: syd, prefix: australia }
+          - { region: hkg, prefix: china }
+    env:
+      RELAY_APP: purrtransport-${{ matrix.prefix }}
     steps:
       - uses: actions/checkout@v7
       - uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Ensure app exists
-        run: |
-          RELAY_APP="${APP_NAME}-${{ matrix.prefix }}"
-          echo "Ensuring relay app $RELAY_APP exists in region ${{ matrix.region }}"
-          flyctl apps create $RELAY_APP 2>/dev/null || echo "Relay app $RELAY_APP already exists"
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Ensure IPs allocated
-        id: relay_network
-        run: |
-          RELAY_APP="${APP_NAME}-${{ matrix.prefix }}"
-          IPS=$(flyctl ips list --app "$RELAY_APP" --json)
-
-          # Public UDP needs a dedicated IPv4; shared_v4 does not qualify.
-          if ! jq -e '.[] | select(.Type=="v4")' <<< "$IPS" > /dev/null; then
-            echo "No dedicated IPv4 found, allocating one..."
-            flyctl ips allocate-v4 --app "$RELAY_APP" --yes
-            IPS=$(flyctl ips list --app "$RELAY_APP" --json)
-          else
-            echo "Dedicated IPv4 already exists for $RELAY_APP"
-          fi
-
-          # Supply ICE candidates on the gateway's first boot.
-          WEBRTC_PUBLIC_IP=$(jq -er '[.[] | select(.Type=="v4") | .Address] | if length > 0 then join(",") else error("No dedicated IPv4 available") end' <<< "$IPS")
-          echo "public_ip=$WEBRTC_PUBLIC_IP" >> "$GITHUB_OUTPUT"
-
-          if ! jq -e '.[] | select(.Type=="v6")' <<< "$IPS" > /dev/null; then
-            echo "No IPv6 found, allocating one..."
-            flyctl ips allocate-v6 --app "$RELAY_APP"
-          else
-            echo "IPv6 already exists for $RELAY_APP"
-          fi
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Deploy Relay
+      - name: Verify stable relay network and dedicated UDP IPv4
+        id: network
+        run: >-
+          python3 .github/scripts/fly_generations.py network
+          --app "$RELAY_APP" --domain "$RELAY_APP.$APP_DOMAIN" --udp
+      - name: Build and push relay image without deploying
+        timeout-minutes: 15
         working-directory: PurrLay
-        run: |
-          flyctl deploy --remote-only --strategy immediate \
-            --app "${APP_NAME}-${{ matrix.prefix }}" \
-            --primary-region ${{ matrix.region }} \
-            --env BALANCER_URL="https://${APP_NAME}.${APP_DOMAIN}" \
-            --env HOST_DOMAIN="${APP_NAME}-${{ matrix.prefix }}.${APP_DOMAIN}" \
-            --env HOST_REGION=${{ matrix.prefix }} \
-            --env HOST_SSL="true" \
-            --env WEBRTC_PUBLIC_IP="$WEBRTC_PUBLIC_IP" \
-            --env SECRET="${APP_SECRET}"
+        run: >-
+          flyctl deploy --build-only --push --local-only
+          --app "$RELAY_APP" --image-label "generation-$DEPLOYMENT_ID"
+      - name: Start isolated relay, activate new allocations and drain predecessors
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          WEBRTC_PUBLIC_IP: ${{ steps.relay_network.outputs.public_ip }}
-
-      - name: Ensure cert exists
-        run: flyctl certs create "${APP_NAME}-${{ matrix.prefix }}.${APP_DOMAIN}" --app "${APP_NAME}-${{ matrix.prefix }}" || true
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Force scale to 1
-        run: flyctl scale count 1 --app "${APP_NAME}-${{ matrix.prefix }}" --yes
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Update Cloudflare DNS (A + AAAA)
-        run: |
-          RELAY_APP="${APP_NAME}-${{ matrix.prefix }}"
-          
-          # IPv4
-          IP=$(flyctl ips list --app $RELAY_APP --json | jq -r '.[] | select(.Type=="v4") | .Address')
-          echo "Updating A record for ${RELAY_APP}.${APP_DOMAIN} -> $IP"
-          
-          if [ -n "$IP" ]; then
-            RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records?type=A&name=${RELAY_APP}.${APP_DOMAIN}" \
-              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-              -H "Content-Type: application/json" | jq -r '.result[0].id')
-          
-            if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
-              echo "Creating new A record"
-              curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records" \
-                -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"A\",\"name\":\"${RELAY_APP}.${APP_DOMAIN}\",\"content\":\"$IP\",\"ttl\":120,\"proxied\":false}" | jq .
-            else
-              echo "Updating existing A record $RECORD_ID"
-              curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records/$RECORD_ID" \
-                -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"A\",\"name\":\"${RELAY_APP}.${APP_DOMAIN}\",\"content\":\"$IP\",\"ttl\":120,\"proxied\":false}" | jq .
-            fi
-          fi
-          
-          # IPv6
-          IPV6=$(flyctl ips list --app $RELAY_APP --json | jq -r '.[] | select(.Type=="v6") | .Address')
-          echo "Updating AAAA record for ${RELAY_APP}.${APP_DOMAIN} -> $IPV6"
-          
-          if [ -n "$IPV6" ]; then
-            RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records?type=AAAA&name=${RELAY_APP}.${APP_DOMAIN}" \
-              -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-              -H "Content-Type: application/json" | jq -r '.result[0].id')
-          
-            if [ "$RECORD_ID" = "null" ] || [ -z "$RECORD_ID" ]; then
-              echo "Creating new AAAA record"
-              curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records" \
-                -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"AAAA\",\"name\":\"${RELAY_APP}.${APP_DOMAIN}\",\"content\":\"$IPV6\",\"ttl\":120,\"proxied\":false}" | jq .
-            else
-              echo "Updating existing AAAA record $RECORD_ID"
-              curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/dns_records/$RECORD_ID" \
-                -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"AAAA\",\"name\":\"${RELAY_APP}.${APP_DOMAIN}\",\"content\":\"$IPV6\",\"ttl\":120,\"proxied\":false}" | jq .
-            fi
-          fi
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          WEBRTC_PUBLIC_IP: ${{ steps.network.outputs.public_ip }}
+        run: >-
+          python3 .github/scripts/fly_generations.py relay
+          --app "$RELAY_APP" --region "${{ matrix.region }}" --prefix "${{ matrix.prefix }}"
+          --domain "$RELAY_APP.$APP_DOMAIN" --public-ip "$WEBRTC_PUBLIC_IP"
+          --deployment "$DEPLOYMENT_ID" --image "registry.fly.io/$RELAY_APP:generation-$DEPLOYMENT_ID"
+          --balancer "https://$APP_NAME.$APP_DOMAIN"

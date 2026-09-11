@@ -12,6 +12,8 @@ public static class PipeRelay
     [ThreadStatic] static PacketWriter? _writerField;
     static PacketWriter _writer => _writerField ??= new PacketWriter();
 
+    internal static int ConnectionCount { get { lock (_pipeLock) return _pipeClients.Count; } }
+
     public static bool IsClient(int connId)
     {
         lock (_pipeLock)

@@ -48,7 +48,17 @@ internal sealed class WebRtcGatewayRuntime : IDisposable
     }
 
     internal bool Available => Volatile.Read(ref _disposed) == 0 && Volatile.Read(ref _current) is { Available: true };
-    internal string? PublicUrl => Available ? Program.GetRelayEndpoint().TrimEnd('/') + "/webrtc/offer" : null;
+    internal string? PublicUrl
+    {
+        get
+        {
+            if (!Available) return null;
+            if (!string.IsNullOrEmpty(RelayDeployment.DeploymentId) && Env.TryGetValue("BALANCER_URL", out var balancer) &&
+                !string.IsNullOrWhiteSpace(balancer))
+                return balancer.TrimEnd('/') + $"/relay/{Program.ProcessInstanceId}/webrtc/offer";
+            return Program.GetRelayEndpoint().TrimEnd('/') + "/webrtc/offer";
+        }
+    }
 
     internal static Task<WebRtcGatewayRuntime?> StartAsync()
     {
@@ -189,13 +199,19 @@ internal sealed class WebRtcGatewayRuntime : IDisposable
 
     internal async Task<ApiResponse> OfferAsync(HttpRequestBase request)
     {
-        var attempt = Volatile.Read(ref _current);
-        if (Volatile.Read(ref _disposed) != 0 || attempt is not { Available: true })
+        if (!RelayDeployment.TryBeginOffer())
             return ApiResponse.FromError("WebRTC gateway is unavailable.", HttpStatusCode.ServiceUnavailable);
-        var response = await ProxyOfferAsync(request, attempt.Http, new Uri(attempt.Gateway, "offer"), attempt.Stopping);
-        return Available && ReferenceEquals(attempt, Volatile.Read(ref _current)) && !attempt.Stopping.IsCancellationRequested
-            ? response
-            : ApiResponse.FromError("WebRTC gateway is unavailable.", HttpStatusCode.ServiceUnavailable);
+        try
+        {
+            var attempt = Volatile.Read(ref _current);
+            if (Volatile.Read(ref _disposed) != 0 || attempt is not { Available: true })
+                return ApiResponse.FromError("WebRTC gateway is unavailable.", HttpStatusCode.ServiceUnavailable);
+            var response = await ProxyOfferAsync(request, attempt.Http, new Uri(attempt.Gateway, "offer"), attempt.Stopping);
+            return Available && ReferenceEquals(attempt, Volatile.Read(ref _current)) && !attempt.Stopping.IsCancellationRequested
+                ? response
+                : ApiResponse.FromError("WebRTC gateway is unavailable.", HttpStatusCode.ServiceUnavailable);
+        }
+        finally { RelayDeployment.EndOffer(); }
     }
 
     internal static async Task<ApiResponse> ProxyOfferAsync(HttpRequestBase request, HttpClient http, Uri target,

@@ -20,6 +20,55 @@ also clears routes owned by the previous process.
 
 Run the room lifecycle regression tests with `dotnet test PurrLay.sln`.
 
+## Deployments that preserve rooms
+
+For the first production rollout, enable **initial_legacy_cutover** in the
+**Deploy Purr Transport** GitHub Action. The existing IPv4-only balancer cannot
+transfer its directory over Fly's private IPv6 network, so this explicit one-time
+cutover starts a fresh directory. Existing regional relays and their live
+connections keep running, but old room discovery and reconnect information is
+lost. Leave the option disabled for subsequent deployments.
+
+The deployment workflow starts a new relay Machine alongside the current one.
+After the replacement is ready, new rooms use it; existing rooms, late joins,
+host migration, and established connections continue on their original relay.
+Old relays remain reachable until they have no rooms, pending allocations,
+negotiations, or transport connections. Retirement seals further admission before
+the cleanup workflow stops the Machine. A failed status request is never treated
+as evidence that a relay is empty, and there is no deadline that forcibly ends
+long matches.
+
+Each regional app keeps its existing hostname and public addresses. Every relay
+generation has separate service ports, returned through the existing allocation
+and join responses. This also supports older clients that cache the regional
+hostname. Region checks contact the relay directly so they measure the player's
+path to that region. WebRTC signaling uses the balancer's existing HTTPS endpoint,
+which forwards each offer to the correct relay generation.
+
+Balancer updates transfer the complete room directory and ownership records to
+the successor. Once the transfer commits, the predecessor forwards subsequent
+requests to that successor. The replacement becomes ready only after it has the
+state needed to serve requests. Each new balancer keeps a durable checkpoint on
+its own encrypted 1 GB Fly volume so a restart can restore that directory.
+New rooms and old rooms retain their respective owners during the transition.
+
+The initial cutover stops and retains the old balancer only after its replacement
+is ready. Later deployments require a successful state transfer; a failed handoff
+never starts a fresh directory. Legacy regional relays remain running because
+their old connection count does not prove that every session has ended. They are
+not automatically destroyed. New generations support automatic retirement;
+retained generations incur their normal Machine costs while they remain running.
+
+Use the deployment and cleanup workflows to manage these Machines. They create
+and retire individual generations; running an ordinary `fly deploy` or scaling a
+regional app down to one Machine bypasses this lifecycle and can interrupt rooms.
+Existing GitHub secrets are reused. The rollout changes require no game-client
+update. This preserves sessions during planned deployments; it does not transfer
+live sessions away from a crashed relay.
+
+See the [deployment operations guide](.github/scripts/README.md) for retry,
+cleanup, and recovery details.
+
 ## Optional browser WebRTC
 
 PurrLay can terminate browser WebRTC data channels and forward them to existing
@@ -53,7 +102,8 @@ should be published by Docker, Fly, or a reverse proxy.
 The GitHub Actions deployment workflow handles WebRTC configuration automatically:
 it ensures each regional relay has a dedicated IPv4 before deployment and passes
 that address as `WEBRTC_PUBLIC_IP`. The Docker image builds and enables the
-gateway, and `PurrLay/fly.toml` exposes UDP `7779`. No additional GitHub secrets or
+gateway. Generation deployments assign its UDP port alongside the other service
+ports; `PurrLay/fly.toml` retains UDP `7779` for manual deployments. No additional GitHub secrets or
 manual per-region settings are required. Push these changes before running the
 workflow, and rebuild browser games with the updated PurrTransport to use WebRTC.
 
@@ -68,7 +118,8 @@ the gateway. TLS terminates on the existing HTTPS relay API for signaling; the
 WebRTC data connection negotiates its own DTLS encryption.
 
 Allocation, join, and migration details include `webRtcUrl` only after the
-gateway is healthy. This absolute URL is the existing relay API plus
+gateway is healthy. Generation deployments use the balancer's HTTPS endpoint at
+`/relay/{instanceId}/webrtc/offer`; manual deployments use the relay API's
 `/webrtc/offer`. The endpoint accepts `POST` JSON `{ "type": "offer", "sdp": "..." }`
 and returns a gathered SDP answer. Signaling bodies are limited to 128 KiB and
 negotiation requests time out after 25 seconds. A gateway failure closes its

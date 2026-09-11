@@ -39,6 +39,11 @@ public static class Transport
         }
     }
 
+    internal static int GetTransportConnectionCount()
+    {
+        lock (_transportLock) return _connToUDP.Count;
+    }
+
     internal static void RemoveEmptyRoomState(ulong roomId)
     {
         lock (_transportLock)
@@ -52,12 +57,13 @@ public static class Transport
 
     public static int ReserveConnId(bool isUdp)
     {
-        var connId = Interlocked.Increment(ref _nextConnId) - 1;
         lock (_transportLock)
         {
+            if (RelayDeployment.Retired) return 0;
+            var connId = Interlocked.Increment(ref _nextConnId) - 1;
             _connToUDP[connId] = isUdp;
+            return connId;
         }
-        return connId;
     }
 
     public static void ReleaseRoomHostForMigration(ulong roomId)
@@ -376,7 +382,11 @@ public static class Transport
             // Pipe connections — no room, no host, just forwarding
             if (auth.pipe)
             {
-                PipeRelay.AddClient(player);
+                lock (_transportLock)
+                {
+                    if (RelayDeployment.Retired || !_connToUDP.ContainsKey(player.connId)) return;
+                    PipeRelay.AddClient(player);
+                }
 
                 _writer.Reset();
                 _writer.Put((byte)SERVER_PACKET_TYPE.SERVER_PIPE_AUTHENTICATED);
@@ -396,6 +406,7 @@ public static class Transport
 
             lock (_transportLock)
             {
+                if (RelayDeployment.Retired || !_connToUDP.ContainsKey(player.connId)) return;
                 if (string.IsNullOrWhiteSpace(auth.roomName) || string.IsNullOrWhiteSpace(auth.clientSecret) ||
                     !Lobby.TryGetRoom(auth.roomName, out room) || room == null)
                 {

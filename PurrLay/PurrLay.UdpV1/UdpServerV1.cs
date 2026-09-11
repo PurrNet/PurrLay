@@ -33,7 +33,9 @@ public class UdpServerV1 : IUdpServer, INetLogger
         _serverListener.PeerDisconnectedEvent += OnServerDisconnected;
         _serverListener.NetworkReceiveEvent += OnServerData;
 
-        if (Environment.GetEnvironmentVariable("FLY_PROCESS_GROUP") != null)
+        bool started;
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("FLY_APP_NAME")) ||
+            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("FLY_PROCESS_GROUP")))
         {
             var addresses = Dns.GetHostAddresses("fly-global-services");
             var ipv4 = addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
@@ -41,9 +43,10 @@ public class UdpServerV1 : IUdpServer, INetLogger
             var ipv6 = addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetworkV6)
                        ?? IPAddress.IPv6Any;
             Console.WriteLine($"UdpV1 START: IPv4: {ipv4}, IPv6: {ipv6}");
-            _server.Start(ipv4, ipv6, port);
+            started = _server.Start(ipv4, ipv6, port);
         }
-        else _server.Start(port);
+        else started = _server.Start(port);
+        if (!started) throw new IOException($"Could not bind UDP V1 port {port}.");
     }
 
     private static void OnServerConnectionRequest(ConnectionRequest request)
@@ -55,6 +58,11 @@ public class UdpServerV1 : IUdpServer, INetLogger
     {
         Console.WriteLine("Client connected to UDP (V1)");
         var global = _callbacks.ReserveConnId(true);
+        if (global == 0)
+        {
+            _server.DisconnectPeer(conn);
+            return;
+        }
         lock (_udpConnLock)
         {
             _localConnToGlobal[conn] = global;
@@ -110,9 +118,8 @@ public class UdpServerV1 : IUdpServer, INetLogger
         NetPeer? peer;
         lock (_udpConnLock)
         {
-            if (!_globalConnToLocal.Remove(playerConnId, out peer))
+            if (!_globalConnToLocal.TryGetValue(playerConnId, out peer))
                 return;
-            _localConnToGlobal.Remove(peer);
         }
         _server.DisconnectPeer(peer);
     }

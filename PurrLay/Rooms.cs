@@ -59,6 +59,12 @@ public static class Lobby
 
     static string NewSecret() => Guid.NewGuid().ToString().Replace("-", "");
 
+    internal static (int Rooms, int PendingAllocations) GetDeploymentCounts()
+    {
+        lock (_roomLock)
+            return (_room.Values.Count(room => !room.removed), _room.Values.Count(room => room.registrationInProgress));
+    }
+
     /// <summary>
     /// Executes an async task in a fire-and-forget manner, logging any exceptions.
     /// </summary>
@@ -82,6 +88,7 @@ public static class Lobby
         Room room;
         lock (_roomLock)
         {
+            if (RelayDeployment.Draining) throw new RelayDrainingException();
             if (_room.TryGetValue(name, out var existing))
             {
                 if (existing.registrationInProgress)

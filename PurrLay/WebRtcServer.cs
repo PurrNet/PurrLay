@@ -176,6 +176,7 @@ public sealed class WebRtcServer : IUdpServer, IDisposable, IAsyncDisposable
                         !CryptographicOperations.FixedTimeEquals(hello.Payload, owner._token))
                         return;
                     _connId = owner._callbacks.ReserveConnId(true);
+                    if (_connId == 0) return;
                     owner._players[_connId] = this;
                     await stream.WriteAsync(new byte[6], handshake.Token);
                 }

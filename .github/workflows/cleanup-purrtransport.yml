@@ -1,0 +1,29 @@
+name: Retire drained Purr Transport generations
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '3-58/5 * * * *'
+
+concurrency:
+  group: purrtransport-production-generations
+  queue: max
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      APP_SECRET: ${{ secrets.PURR_APP_SECRET }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Retire only generations that confirm no remaining sessions
+        run: >-
+          python3 .github/scripts/fly_generations.py cleanup
+          --app purrtransport --domain purrservers.com

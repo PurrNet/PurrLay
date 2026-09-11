@@ -7,7 +7,7 @@ namespace PurrLay;
 public class UdpServerCallbacks
 {
     /// <summary>
-    /// Reserve a global connection ID. Returns the assigned ID.
+    /// Reserve a global connection ID, or return zero when the relay has retired.
     /// </summary>
     public required Func<bool, int> ReserveConnId { get; init; }
 

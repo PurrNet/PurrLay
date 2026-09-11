@@ -27,6 +27,7 @@ public static class HTTPRestAPI
         ReserveConnId = isUdp =>
         {
             var connId = Transport.ReserveConnId(isUdp);
+            if (connId == 0) return 0;
             lock (_versionLock)
             {
                 _connToUdpVersion[connId] = version;
@@ -188,6 +189,10 @@ public static class HTTPRestAPI
         {
             case "/": return new ApiResponse(DateTime.Now.ToString(CultureInfo.InvariantCulture));
             case "/ping": return new ApiResponse(HttpStatusCode.OK);
+            case "/admin/status": return RelayDeployment.Handle(req, "status");
+            case "/admin/activate": return RelayDeployment.Handle(req, "activate");
+            case "/admin/drain": return RelayDeployment.Handle(req, "drain");
+            case "/admin/retire": return RelayDeployment.Handle(req, "retire");
             case "/webrtc/offer":
                 if (req.Method != WatsonWebserver.Core.HttpMethod.POST)
                     return new ApiResponse(HttpStatusCode.MethodNotAllowed);
@@ -269,9 +274,12 @@ public static class HTTPRestAPI
         if (!string.Equals(internalSec, Program.SECRET_INTERNAL))
             throw new Exception($"Bad internal secret, {internalSec.Length}");
 
-        var secret = await Lobby.CreateRoom(region, name);
+        string secret;
+        try { secret = await Lobby.CreateRoom(region, name); }
+        catch (RelayDrainingException exception)
+        { return ApiResponse.FromError(exception.Message, HttpStatusCode.ServiceUnavailable); }
 
-        webServer ??= new WebSockets(6942);
+        webServer ??= new WebSockets(Program.WEBSOCKETS_PORT);
         udpServerV1 ??= UdpServerFactory.CreateV1(Program.UDP_PORT, CreateCallbacks(1));
         udpServerV2 ??= UdpServerFactory.CreateV2(Program.UDP_PORT_V2, CreateCallbacks(2));
 

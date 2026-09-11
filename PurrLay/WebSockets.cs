@@ -14,18 +14,13 @@ public class WebSockets : IDisposable
     static readonly object _wsConnLock = new();
 
     public int port { get; }
+    internal bool IsReady => !_disposed && _server is { Active: true };
 
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public WebSockets(int port)
     {
         this.port = port;
-        var thread = new Thread(Start);
-        thread.Start();
-    }
-
-    private void Start()
-    {
         var sslConfig = new SslConfig(false, null!, null!, SslProtocols.None);
 
         _server = new SimpleWebServer(int.MaxValue, _tcpConfig, ushort.MaxValue, 5000, sslConfig);
@@ -34,6 +29,12 @@ public class WebSockets : IDisposable
         _server.onDisconnect += OnClientDisconnectedFromServer;
         _server.onData += OnServerReceivedData;
 
+        var thread = new Thread(Start);
+        thread.Start();
+    }
+
+    private void Start()
+    {
         while (!_disposed)
         {
             try
@@ -57,9 +58,14 @@ public class WebSockets : IDisposable
         Dispose();
     }
 
-    private static void OnClientConnected(int conn)
+    private void OnClientConnected(int conn)
     {
         var global = Transport.ReserveConnId(false);
+        if (global == 0)
+        {
+            _server?.KickClient(conn);
+            return;
+        }
         lock (_wsConnLock)
         {
             _localConnToGlobal[conn] = global;
@@ -91,9 +97,8 @@ public class WebSockets : IDisposable
         int localId;
         lock (_wsConnLock)
         {
-            if (!_globalConnToLocal.Remove(connId, out localId))
+            if (!_globalConnToLocal.TryGetValue(connId, out localId))
                 return;
-            _localConnToGlobal.Remove(localId);
         }
         _server?.KickClient(localId);
     }

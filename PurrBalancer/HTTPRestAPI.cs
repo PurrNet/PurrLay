@@ -15,7 +15,7 @@ public struct RoomInfo
     public int connectedPlayers;
 }
 
-public static class HTTPRestAPI
+public static partial class HTTPRestAPI
 {
     private static readonly List<RelayServer> _relayServers = [];
     private static readonly Dictionary<string, string> _lastRelayInstanceIds = new();
@@ -68,17 +68,23 @@ public static class HTTPRestAPI
 
                     if (!success)
                     {
-                        lock (_relayServers)
+                        lock (StateGate)
                         {
-                            for (var i = 0; i < _relayServers.Count; i++)
+                            if (!IsAuthority)
+                                continue;
+                            lock (_relayServers)
                             {
-                                if (_relayServers[i].apiEndpoint == endpoint &&
-                                    string.Equals(_relayServers[i].instanceId, relayInstanceId, StringComparison.Ordinal))
+                                for (var i = 0; i < _relayServers.Count; i++)
                                 {
-                                    _relayServers.RemoveAt(i);
-                                    RemoveRoomsForServerEndpoint(endpoint);
-                                    index--;
-                                    break;
+                                    if (_relayServers[i].apiEndpoint == endpoint &&
+                                        string.Equals(_relayServers[i].instanceId, relayInstanceId, StringComparison.Ordinal))
+                                    {
+                                        _relayServers.RemoveAt(i);
+                                        RemoveRoomsForServerEndpoint(endpoint);
+                                        PersistCheckpoint();
+                                        index--;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -101,7 +107,7 @@ public static class HTTPRestAPI
             for (var i = 0; i < _relayServers.Count; i++)
             {
                 var s = _relayServers[i];
-                if (s.region == region)
+                if (s.region == region && !s.draining)
                 {
                     server = s;
                     return true;
@@ -229,21 +235,28 @@ public static class HTTPRestAPI
     internal static int CleanupEmptyRooms(DateTime now, TimeSpan timeout)
     {
         List<string> removedRooms = [];
-        lock (_roomsLock)
+        lock (StateGate)
         {
-            foreach (var room in _rooms)
+            if (!IsAuthority)
+                return 0;
+            lock (_roomsLock)
             {
-                if (!_roomInstanceIds.ContainsKey(room.name) &&
-                    room.connectedPlayers == 0 &&
-                    _emptyRoomSince.TryGetValue(room.name, out var emptySince) &&
-                    now - emptySince >= timeout)
+                foreach (var room in _rooms)
                 {
-                    removedRooms.Add(room.name);
+                    if (!_roomInstanceIds.ContainsKey(room.name) &&
+                        room.connectedPlayers == 0 &&
+                        _emptyRoomSince.TryGetValue(room.name, out var emptySince) &&
+                        now - emptySince >= timeout)
+                    {
+                        removedRooms.Add(room.name);
+                    }
                 }
-            }
 
-            foreach (var roomName in removedRooms)
-                RemoveRoomUnderLock(roomName);
+                foreach (var roomName in removedRooms)
+                    RemoveRoomUnderLock(roomName);
+            }
+            if (removedRooms.Count > 0)
+                PersistCheckpoint();
         }
 
         if (removedRooms.Count > 0)
@@ -251,7 +264,7 @@ public static class HTTPRestAPI
         return removedRooms.Count;
     }
 
-    public static async Task<ApiResponse> OnRequest(HttpRequestBase req)
+    private static async Task<ApiResponse> OnLocalRequest(HttpRequestBase req)
     {
         if (req.Url == null)
             throw new Exception("Invalid URL");
@@ -264,7 +277,8 @@ public static class HTTPRestAPI
                 return new ApiResponse(HttpStatusCode.OK);
             case "/servers":
                 lock (_relayServers)
-                    return new ApiResponse(new JObject { ["servers"] = JArray.FromObject(_relayServers) });
+                    return PublicServers(_relayServers.Where(server => !server.draining)
+                        .GroupBy(server => server.region).Select(group => group.First()));
             case "/registerServer":
                 return RegisterServer(req);
             case "/unregisterServer":
@@ -674,6 +688,8 @@ public static class HTTPRestAPI
 
         var body = req.DataAsString;
         var server = JObject.Parse(body).ToObject<RelayServer>();
+        if (string.IsNullOrWhiteSpace(server.apiEndpoint) || string.IsNullOrWhiteSpace(server.region))
+            return ApiResponse.FromError("Invalid relay registration", HttpStatusCode.BadRequest);
 
         lock (_relayServers)
         {
@@ -682,7 +698,8 @@ public static class HTTPRestAPI
                 if (_retiredRelayInstanceIds.TryGetValue(server.apiEndpoint, out var retiredInstances) &&
                     retiredInstances.Contains(server.instanceId))
                 {
-                    return RoomMutationAccepted();
+                    server.draining = true;
+                    return ServerRegistrationAccepted(server);
                 }
 
                 if (_lastRelayInstanceIds.TryGetValue(server.apiEndpoint, out var previousInstanceId) &&
@@ -703,23 +720,21 @@ public static class HTTPRestAPI
             {
                 if (string.Equals(_relayServers[i].apiEndpoint, server.apiEndpoint, StringComparison.Ordinal))
                 {
+                    server.draining |= _relayServers[i].draining || _drainingRelayEndpoints.Contains(server.apiEndpoint);
+                    if (IsDesiredActiveRelay(server)) server.draining = false;
                     if (!string.Equals(_relayServers[i].instanceId, server.instanceId, StringComparison.Ordinal))
                         RemoveRoomsForServerEndpoint(server.apiEndpoint);
                     _relayServers[i] = server;
-                    return new ApiResponse(new JObject
-                    {
-                        ["status"] = "ok"
-                    });
+                    return ServerRegistrationAccepted(server);
                 }
             }
 
+            server.draining |= _drainingRelayEndpoints.Contains(server.apiEndpoint);
+            if (IsDesiredActiveRelay(server)) server.draining = false;
             _relayServers.Add(server);
         }
 
-        return new ApiResponse(new JObject
-        {
-            ["status"] = "ok"
-        });
+        return ServerRegistrationAccepted(server);
     }
 
     private static ApiResponse UnregisterServer(HttpRequestBase req)
