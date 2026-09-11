@@ -196,7 +196,8 @@ internal sealed class RoomTestHost : IAsyncDisposable
         return Assert.IsType<Room>(room);
     }
 
-    public PlayerInfo Authenticate(string secret, bool success = true, int backend = 1, bool nat = false)
+    public PlayerInfo Authenticate(string secret, bool success = true, int backend = 1, bool nat = false,
+        bool webRtcP2P = false, bool awaitingWebRtcP2P = false)
     {
         var player = new PlayerInfo(HTTPRestAPI.CreateCallbacks(backend).ReserveConnId(true), true);
         _players.Add(player);
@@ -204,10 +205,12 @@ internal sealed class RoomTestHost : IAsyncDisposable
         {
             ["roomName"] = Name,
             ["clientSecret"] = secret,
-            ["nat"] = nat
+            ["nat"] = nat,
+            ["webRtcP2P"] = webRtcP2P
         }.ToString());
         Transport.OnServerReceivedData(player, data);
-        var expected = success ? SERVER_PACKET_TYPE.SERVER_AUTHENTICATED : SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED;
+        var expected = awaitingWebRtcP2P ? SERVER_PACKET_TYPE.SERVER_WEBRTC_P2P :
+            success ? SERVER_PACKET_TYPE.SERVER_AUTHENTICATED : SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED;
         var recorder = Assert.IsType<RecordingUdpServer>(HTTPRestAPI.GetUdpServerForConnection(player.connId));
         Assert.Contains(recorder.Packets, packet => packet.Connection == player.connId && packet.Data[0] == (byte)expected);
         return player;
@@ -279,7 +282,14 @@ internal sealed class RoomTestHost : IAsyncDisposable
     internal sealed class RecordingUdpServer : IUdpServer
     {
         public ConcurrentQueue<(int Connection, byte[] Data, byte Method)> Packets { get; } = new();
-        public void SendOne(int connId, ReadOnlySpan<byte> data, byte deliveryMethod) => Packets.Enqueue((connId, data.ToArray(), deliveryMethod));
-        public void KickClient(int connId) { }
+        public ConcurrentQueue<int> Kicked { get; } = new();
+        public Action<int, byte[]>? BeforeSend { get; set; }
+        public void SendOne(int connId, ReadOnlySpan<byte> data, byte deliveryMethod)
+        {
+            var packet = data.ToArray();
+            BeforeSend?.Invoke(connId, packet);
+            Packets.Enqueue((connId, packet, deliveryMethod));
+        }
+        public void KickClient(int connId) => Kicked.Enqueue(connId);
     }
 }

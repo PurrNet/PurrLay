@@ -3,7 +3,7 @@ using Newtonsoft.Json;
 
 namespace PurrLay;
 
-public static class Transport
+public static partial class Transport
 {
     /// <summary>
     /// DeliveryMethod.ReliableOrdered byte value — same across LiteNetLib v1 and v2.
@@ -69,18 +69,27 @@ public static class Transport
     public static void ReleaseRoomHostForMigration(ulong roomId)
     {
         PlayerInfo host;
+        List<PlayerInfo> directClients;
         int count = -1;
 
         lock (_transportLock)
         {
-            if (!_roomToHost.Remove(roomId, out host))
+            if (!_roomToHost.TryGetValue(roomId, out host))
                 return;
 
+            FinishPendingWebRtcP2PForHost(host);
+            directClients = _roomToClients.TryGetValue(roomId, out var members)
+                ? members.Where(player => _webRtcDirectClients.Contains(player.connId)).ToList()
+                : [];
+            _roomToHost.Remove(roomId);
+
             _clientToRoom.Remove(host);
+            foreach (var client in directClients) _clientToRoom.Remove(client);
 
             if (_roomToClients.TryGetValue(roomId, out var clients))
             {
                 clients.Remove(host);
+                foreach (var client in directClients) clients.Remove(client);
                 count = clients.Count;
             }
 
@@ -89,6 +98,7 @@ public static class Transport
         }
 
         KickPlayer(host);
+        foreach (var client in directClients) KickPlayer(client);
     }
 
     static void KickPlayer(PlayerInfo player)
@@ -120,7 +130,7 @@ public static class Transport
 
     public static void OnServerReceivedData(PlayerInfo sender, ArraySegment<byte> data)
     {
-        if (data.Array == null)
+        if (data.Array == null || data.Count == 0)
             return;
 
         // Pipe clients are routed separately — no rooms, no host
@@ -151,6 +161,17 @@ public static class Transport
 
             if (!_roomToHost.TryGetValue(roomId, out hostId))
                 return;
+
+            if ((hostId == sender && data[0] == (byte)HOST_PACKET_TYPE.WEBRTC_P2P) ||
+                (hostId != sender && sender.isUdp && data[0] == 255))
+            {
+                ReceiveWebRtcP2PControl(sender, roomId, hostId,
+                    new ArraySegment<byte>(data.Array, data.Offset + 1, data.Count - 1));
+                return;
+            }
+
+            if (_pendingWebRtcClients.ContainsKey(sender.connId) || _webRtcDirectClients.Contains(sender.connId))
+                return;
         }
 
         if (hostId == sender)
@@ -168,6 +189,8 @@ public static class Transport
                 case HOST_PACKET_TYPE.SEND_ONE:
                 {
                     const int metdataLength = sizeof(int);
+                    if (subData.Count < metdataLength + (sender.isUdp ? 1 : 0))
+                        break;
 
                     int target = subData.Array[subData.Offset + 0] |
                                  subData.Array[subData.Offset + 1] << 8 |
@@ -182,6 +205,7 @@ public static class Transport
                             break;
 
                         isValidTarget = _clientToRoom.TryGetValue(new PlayerInfo(target, isUDP), out var room) && room == roomId;
+                        isValidTarget &= !_pendingWebRtcClients.ContainsKey(target) && !_webRtcDirectClients.Contains(target);
                     }
 
                     if (!isValidTarget)
@@ -310,7 +334,9 @@ public static class Transport
 
         lock (_transportLock)
         {
-            if (!_clientToRoom.Remove(conn, out roomId))
+            bool hadRoom = _clientToRoom.Remove(conn, out roomId);
+            RemoveWebRtcP2PPeer(conn);
+            if (!hadRoom)
                 return;
 
             if (_roomToHost.TryGetValue(roomId, out var hostId) && hostId.Equals(conn))
@@ -403,6 +429,7 @@ public static class Transport
             bool isHost = false;
             List<PlayerInfo>? existingClients = null;
             bool hadExistingClients = false;
+            bool awaitingWebRtcP2P = false;
 
             lock (_transportLock)
             {
@@ -434,6 +461,8 @@ public static class Transport
 
                 if (auth.nat)
                     _natCapable.Add(player.connId);
+                if (auth.webRtcP2P && player.isUdp && HTTPRestAPI.SupportsWebRtcP2P(player.connId))
+                    _webRtcP2PPeers.Add(player.connId, new WebRtcP2PPeer());
 
                 if (!_roomToClients.TryGetValue(room.roomId, out var list))
                 {
@@ -448,7 +477,11 @@ public static class Transport
                     list.Add(player);
                     Lobby.UpdateRoomPlayerCount(room.roomId, list.Count);
                 }
+
+                if (!isHost) awaitingWebRtcP2P = TryStartWebRtcP2P(room.roomId, player);
             }
+
+            if (awaitingWebRtcP2P) return;
 
             // A client just joined — if both it and the host support NAT punch, introduce them
             // so they can attempt a direct P2P link.
@@ -481,7 +514,18 @@ public static class Transport
                 else SendClientsConnected(room.roomId, player);
             }
 
-            SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATED);
+            if (isHost)
+            {
+                lock (_transportLock)
+                {
+                    SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATED);
+                    if (_connToUDP.ContainsKey(player.connId) &&
+                        _roomToHost.TryGetValue(room.roomId, out var currentHost) && currentHost == player &&
+                        _webRtcP2PPeers.TryGetValue(player.connId, out var peer))
+                        peer.HostReady = true;
+                }
+            }
+            else SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATED);
         }
         catch(Exception e)
         {

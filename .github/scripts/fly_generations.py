@@ -3,9 +3,12 @@
 
 import argparse
 import contextlib
+import datetime
 import hashlib
+import html
 import json
 import os
+from pathlib import Path
 import re
 import socket
 import subprocess
@@ -17,7 +20,7 @@ import urllib.request
 
 
 REGIONS = (("cdg", "france"), ("gru", "brazil"), ("jnb", "south-africa"),
-           ("ewr", "nj-us"), ("nrt", "japan"), ("syd", "australia"), ("hkg", "china"))
+           ("ewr", "nj-us"), ("nrt", "japan"), ("syd", "australia"), ("sin", "china"))
 OWNER = "purr-generations-v1"
 PORT_FIRST, PORT_LAST, PORT_COUNT = 20000, 59999, 5
 
@@ -26,10 +29,144 @@ class DeploymentError(RuntimeError):
     pass
 
 
+class MachineRetiredError(DeploymentError):
+    pass
+
+
+class CleanupReport:
+    def __init__(self, apps=()):
+        self.rows = {}
+        self.apps = dict.fromkeys(apps, "Not checked: cleanup has not reached this app")
+        self.started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    @staticmethod
+    def text(value):
+        value = str(value)
+        for key, secret in os.environ.items():
+            if secret and re.search(r"secret|token|password|authorization|api[-_]?key", key, re.IGNORECASE):
+                value = value.replace(secret, "[redacted]")
+        return " ".join("".join(c for c in value if c.isprintable() or c.isspace()).split())[:1024]
+
+    def track(self, app, machines, role):
+        self.apps[app] = f"Inventoried {len(machines)} machines"
+        for machine in machines:
+            tags = metadata(machine)
+            self.rows[(app, machine["id"])] = {
+                "app": self.text(app), "machine": self.text(machine["id"]), "role": role,
+                "state": self.text(machine.get("state", "unknown")),
+                "phase": self.text(tags.get("purr_phase", "unmanaged")),
+                "deployment": self.text(tags.get("purr_deployment", "legacy / unknown")),
+                "decision": "Not checked", "reason": "Cleanup stopped before evaluating this machine",
+                "activity": "Not queried"}
+
+    def record(self, app, machine, decision, reason, status=None):
+        row = self.rows[(app, machine["id"])]
+        row.update(decision=decision, reason=self.text(reason))
+        if status is not None and row["role"] == "relay":
+            counts = []
+            for key, label in (("roomCount", "rooms"), ("pendingAllocations", "reservations"),
+                               ("transportConnections", "transport connections"),
+                               ("pipeConnections", "pipe connections"), ("pendingOffers", "offers")):
+                value = status.get(key)
+                counts.append(f"{label}: {value if type(value) is int and value >= 0 else '?'}")
+            row["activity"] = "; ".join(counts)
+        print(f"Cleanup: {row['app']}/{row['machine']}: {decision}: {row['reason']}; {row['activity']}")
+
+    def markdown(self):
+        def cell(value):
+            value = html.escape(self.text(value), quote=False)
+            return re.sub(r"([\\`*_[\]{}|])", r"\\\1", value)
+
+        totals = {decision: sum(r["decision"] == decision for r in self.rows.values())
+                  for decision in ("Retired", "Retained", "Needs review", "Not checked")}
+        lines = ["# Purr Transport drain report", "", f"Run started: {self.started_at}", "",
+                 " · ".join(f"**{count} {decision.lower()}**" for decision, count in totals.items()), "",
+                 "Retired means Machine deletion was acknowledged. State and phase are from the initial inventory.",
+                 "Activity is the last retirement check, not a live player count; `?` means unavailable, not zero.", "",
+                 "| App | Inspection |", "| --- | --- |"]
+        lines.extend(f"| {cell(app)} | {cell(note)} |" for app, note in self.apps.items())
+        lines += ["", "| App / Machine | State / phase before | Generation | Decision | Why | Activity |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for row in self.rows.values():
+            values = (row["app"] + " / " + row["machine"], row["state"] + " / " + row["phase"],
+                      row["deployment"], row["decision"], row["reason"], row["activity"])
+            lines.append("| " + " | ".join(cell(value) for value in values) + " |")
+        if not self.rows:
+            lines += ["", "No Machine rows to show. The app inspections above distinguish empty inventories "
+                      "from apps that could not be checked."]
+        lines += ["", "Managed generations retire automatically after confirming they are empty. "
+                  "Legacy/unmanaged Machines cannot supply that proof and need a separate one-time review. "
+                  "They are not automatically removed even if idle.", "",
+                  "A successful workflow can retain Machines. Read 'Needs review' and incomplete app inspections "
+                  "for API errors or missing proof. This report does not force retirement.", ""]
+        return "\n".join(lines)
+
+    def write(self, directory=None):
+        summary = self.markdown()
+        if directory:
+            path = Path(directory)
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "drain-report.md").write_text(summary, encoding="utf-8")
+            (path / "drain-report.json").write_text(json.dumps({
+                "startedAt": self.started_at, "apps": {self.text(k): self.text(v) for k, v in self.apps.items()},
+                "machines": list(self.rows.values())}, indent=2) + "\n", encoding="utf-8")
+        if os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:
+                output.write(summary)
+        print(summary)
+
+
 class HttpError(DeploymentError):
-    def __init__(self, status, url):
+    def __init__(self, status, url, detail=None):
         self.status = status
-        super().__init__(f"HTTP {status}: {url}")
+        super().__init__(f"HTTP {status}: {url}" + (f": {detail}" if detail else ""))
+
+
+def machine_api_error_detail(error, body, headers):
+    try:
+        raw = error.read(8193)
+        if len(raw) > 8192:
+            return None
+        response = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    finally:
+        error.close()
+    if not isinstance(response, dict):
+        return None
+    detail = response.get("error") or response.get("message")
+    if isinstance(detail, dict):
+        detail = detail.get("message")
+    if not isinstance(detail, str):
+        return None
+
+    sensitive = re.compile(r"secret|token|password|authorization|api[-_]?key|private[-_]?key", re.IGNORECASE)
+    credentials = set()
+    def collect(value, marked=False):
+        if isinstance(value, dict):
+            named_header = sensitive.search(str(value.get("name", "")))
+            for key, item in value.items():
+                collect(item, marked or bool(sensitive.search(str(key))) or bool(named_header and key == "values"))
+        elif isinstance(value, list):
+            for item in value:
+                collect(item, marked)
+        elif marked and isinstance(value, str) and value:
+            credentials.add(value)
+            if value.startswith("Bearer "):
+                credentials.add(value[7:])
+    collect(body)
+    collect(headers or {})
+    collect(dict(os.environ))
+    for credential in sorted(credentials, key=len, reverse=True):
+        for encoded in (credential, json.dumps(credential)[1:-1], urllib.parse.quote(credential, safe="")):
+            detail = detail.replace(encoded, "<redacted>")
+    # API error text can echo a submitted config; never include structured payloads.
+    detail = re.split(r"[\[{]", detail, maxsplit=1)[0]
+    detail = re.sub(r"(?i)\b(?:Bearer|FlyV1)\s+\S+", "[credential omitted]", detail)
+    detail = re.sub(r"(?i)\b(?:secret|token|password|authorization|api[-_]?key)\s*[:=]\s*\S+",
+                    "[credential omitted]", detail)
+    detail = " ".join("".join(char for char in detail if char.isprintable() or char.isspace()).split())
+    return detail[:512] if detail else None
 
 
 def request(method, url, body=None, headers=None, timeout=30):
@@ -47,7 +184,12 @@ def request(method, url, body=None, headers=None, timeout=30):
                 raise DeploymentError(f"Response too large: {url}")
             return json.loads(data) if data else None
     except urllib.error.HTTPError as error:
-        raise HttpError(error.code, url) from None
+        detail = None
+        if urllib.parse.urlsplit(url).hostname == "api.machines.dev":
+            detail = machine_api_error_detail(error, body, headers)
+        else:
+            error.close()
+        raise HttpError(error.code, url, detail) from None
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         raise DeploymentError(f"Request failed: {url}: {type(error).__name__}") from None
 
@@ -244,10 +386,14 @@ class Fly:
         self.call("DELETE", f"/apps/{app}/machines/{machine_id}")
         print(f"Retired {app}/{machine_id}")
         if volume_id:
-            volume = self.call("GET", f"/apps/{app}/volumes/{volume_id}")
-            if volume.get("attached_machine_id") or volume.get("name") != volume_name(tags["purr_deployment"]):
-                raise DeploymentError(f"Retaining unexpected/attached volume {volume_id}")
-            self.call("DELETE", f"/apps/{app}/volumes/{volume_id}")
+            try:
+                volume = self.call("GET", f"/apps/{app}/volumes/{volume_id}")
+                if volume.get("attached_machine_id") or volume.get("name") != volume_name(tags["purr_deployment"]):
+                    raise DeploymentError(f"Retaining unexpected/attached volume {volume_id}")
+                self.call("DELETE", f"/apps/{app}/volumes/{volume_id}")
+            except DeploymentError as error:
+                raise MachineRetiredError(f"Machine deleted; volume {volume_id} cleanup unconfirmed; "
+                                          f"inspect it manually: {error}") from error
             print(f"Deleted retired generation volume {volume_id}")
 
 
@@ -586,35 +732,56 @@ def deploy_relay(fly, admin, args):
         print(f"Draining {args.app}/{old['id']}: {drained.get('roomCount')} rooms")
 
 
-def prune_relays(fly, admin, app, balancer):
+def prune_relays(fly, admin, app, balancer, report=None):
+    report = report if report is not None else CleanupReport()
+    machines = fly.machines(app)
+    report.track(app, machines, "relay")
     registry = admin.status(balancer)
     active = active_endpoints(registry)
-    for machine in fly.machines(app):
+    for machine in machines:
         tags = metadata(machine)
         endpoint = tags.get("purr_endpoint")
         if not owned(machine, "relay"):
+            report.record(app, machine, "Retained", "Legacy/unmanaged Machine: no supported retirement proof; "
+                          "requires a separate one-time review, not automatic cleanup")
             continue
-        if not endpoint or endpoint in active:
+        if not endpoint:
+            report.record(app, machine, "Needs review", "Missing relay endpoint metadata; cannot verify retirement")
+            continue
+        if endpoint in active:
+            report.record(app, machine, "Retained", "Active relay endpoint in the authoritative balancer; excluded from retirement")
             continue
         registrations = [s for s in registry["relayServers"] if s.get("apiEndpoint") == endpoint]
         superseded = (len(registrations) == 1 and registrations[0].get("draining") is True and
                       registrations[0].get("deploymentId") == tags.get("purr_deployment"))
         if tags.get("purr_phase") not in ("draining", "retired") and not superseded:
+            report.record(app, machine, "Retained", "Not marked draining/retired and no matching registry proof "
+                          "that this generation was superseded; an absent registration is not proof")
             continue
+        status = None
         try:
             if machine["state"] == "stopped" and tags.get("purr_retirement"):
                 fly.stop_destroy(app, machine, admin)
+                report.record(app, machine, "Retired", "Deleted stopped Machine using recorded retirement proof")
                 continue
             if machine["state"] != "started":
+                report.record(app, machine, "Retained", "Machine is not started; cannot verify an empty process "
+                              "and no usable stopped-Machine retirement proof")
                 continue
             status = admin.status(endpoint)
             if status.get("deploymentId") != tags.get("purr_deployment") or not status.get("instanceId"):
+                report.record(app, machine, "Needs review", "Deployment identity mismatch or missing process identity", status)
                 continue
             if superseded and status.get("draining") is not True:
                 status = admin.mutate(endpoint, "drain", status["instanceId"])
                 if status.get("draining") is True:
                     fly.tag(app, machine["id"], "purr_phase", "draining")
-            if status.get("draining") is not True or status.get("canRetire") is not True:
+            if status.get("draining") is not True:
+                report.record(app, machine, "Retained", "Process has not confirmed draining", status)
+                continue
+            if status.get("canRetire") is not True:
+                report.record(app, machine, "Retained", "Draining: process has not confirmed it can retire; "
+                              "remaining activity or incomplete retirement status", status)
                 continue
             retired = admin.mutate(endpoint, "retire", status["instanceId"])
             if (retired.get("retired") is not True or retired.get("instanceId") != status["instanceId"] or
@@ -624,43 +791,88 @@ def prune_relays(fly, admin, app, balancer):
             fly.tag(app, machine["id"], "purr_phase", "retired")
             machine = fly.get(app, machine["id"])
             fly.stop_destroy(app, machine, admin)
+            report.record(app, machine, "Retired", "Empty process atomically retired; Machine deletion confirmed", status)
+        except MachineRetiredError as error:
+            report.record(app, machine, "Retired", str(error), status)
         except DeploymentError as error:
-            print(f"Retaining {app}/{machine['id']}: {error}", file=sys.stderr)
+            report.record(app, machine, "Needs review", f"Cleanup could not confirm completion; retry on the next run: {error}", status)
+    report.apps[app] = f"Checked all {len(machines)} machines"
 
 
-def prune_balancers(fly, admin, app, open_tunnel=tunnel):
+def prune_balancers(fly, admin, app, open_tunnel=tunnel, report=None):
+    report = report if report is not None else CleanupReport()
     candidates = []
     machines = sorted(fly.machines(app), key=lambda m: m.get("created_at", ""))
-    # Resolve all forwarding chains before deleting any intermediate predecessor.
+    report.track(app, machines, "balancer")
+    pending = []
     for machine in machines:
+        if not owned(machine, "balancer"):
+            report.record(app, machine, "Retained", "Legacy/unmanaged balancer: may be a directory dependency; "
+                          "requires a separate one-time review")
+        elif metadata(machine).get("purr_phase") not in ("draining", "retired"):
+            report.record(app, machine, "Retained", "Balancer phase is not draining/retired; preserve the active "
+                          "or unfinished generation")
+        else:
+            pending.append(machine)
+
+    def retain_chain(blocker, reason):
+        for candidate in pending:
+            detail = reason if candidate["id"] == blocker["id"] else (
+                f"Balancer chain retained because {blocker['id']} could not be verified: {reason}")
+            report.record(app, candidate, "Needs review", detail)
+        report.apps[app] = "Balancer chain blocked; no balancers deleted"
+
+    # Resolve all forwarding chains before deleting any intermediate predecessor.
+    for machine in pending:
         tags = metadata(machine)
-        if not owned(machine, "balancer") or tags.get("purr_phase") not in ("draining", "retired"):
-            continue
         try:
             if machine["state"] == "stopped" and tags.get("purr_retirement"):
                 candidates.append((machine, None))
                 continue
             if machine["state"] != "started":
+                retain_chain(machine, "Machine is not started and has no usable stopped-Machine retirement proof")
                 return
             with open_tunnel(app, machine["id"]) as endpoint:
                 status = admin.status(endpoint, host=private_host(app, machine["id"]))
             if status.get("canRetire") is not True or not status.get("successorUrl") or not status.get("instanceId"):
-                print(f"Retaining balancer dependency {app}/{machine['id']}")
+                retain_chain(machine, "Dependency or incomplete retirement proof: successor, process identity "
+                             "and canRetire=true are required")
                 return
             candidates.append((machine, status))
         except DeploymentError as error:
-            print(f"Retaining balancer chain: {app}/{machine['id']}: {error}", file=sys.stderr)
+            retain_chain(machine, f"Unable to verify the balancer forwarding chain: {error}")
             return
     for machine, status in candidates:
         try:
             if status is None:
                 fly.stop_destroy(app, machine, admin, open_tunnel)
+                report.record(app, machine, "Retired", "Deleted stopped balancer using recorded retirement proof")
                 continue
             fly.tag(app, machine["id"], "purr_retirement", status["instanceId"])
             fly.tag(app, machine["id"], "purr_phase", "retired")
             fly.stop_destroy(app, fly.get(app, machine["id"]), admin, open_tunnel)
+            report.record(app, machine, "Retired", "Successor and retirement proof verified; Machine and owned volume cleanup confirmed")
+        except MachineRetiredError as error:
+            report.record(app, machine, "Retired", str(error))
         except DeploymentError as error:
-            print(f"Retaining {app}/{machine['id']}: {error}", file=sys.stderr)
+            report.record(app, machine, "Needs review", f"Cleanup could not confirm completion; retry on the next run: {error}")
+    report.apps[app] = f"Checked all {len(machines)} machines"
+
+
+def cleanup(fly, admin, args):
+    apps = [f"{args.app}-{prefix}" for _, prefix in REGIONS] + [args.app]
+    report = CleanupReport(apps)
+    current_app = apps[0]
+    try:
+        for current_app in apps[:-1]:
+            prune_relays(fly, admin, current_app, f"https://{args.app}.{args.domain}", report)
+        current_app = args.app
+        prune_balancers(fly, admin, current_app, report=report)
+    except Exception as error:
+        report.apps[current_app] = report.text(f"Inspection incomplete: {error}")
+        raise
+    finally:
+        report.write(getattr(args, "report_dir", None))
 
 
 def run_json(*args):
@@ -732,6 +944,7 @@ def main():
                                help="One-time legacy balancer replacement without transferring its room directory")
         if command == "cleanup":
             child.add_argument("--domain", required=True)
+            child.add_argument("--report-dir", help="Write Markdown and JSON drain reports in this directory")
     args = parser.parse_args()
     if hasattr(args, "deployment") and not re.fullmatch(r"[a-z0-9-]{1,35}", args.deployment):
         parser.error("deployment must contain 1–35 lowercase letters, digits or hyphens")
@@ -744,10 +957,7 @@ def main():
     elif args.command == "relay":
         deploy_relay(fly, admin, args)
     else:
-        balancer = f"https://{args.app}.{args.domain}"
-        for _, prefix in REGIONS:
-            prune_relays(fly, admin, f"{args.app}-{prefix}", balancer)
-        prune_balancers(fly, admin, args.app)
+        cleanup(fly, admin, args)
 
 
 if __name__ == "__main__":

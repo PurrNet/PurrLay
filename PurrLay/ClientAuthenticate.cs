@@ -1,6 +1,6 @@
 ﻿namespace PurrLay;
 
-public struct ClientAuthenticate(string roomName, string clientSecret, bool pipe = false, bool nat = false)
+public struct ClientAuthenticate(string roomName, string clientSecret, bool pipe = false, bool nat = false, bool webRtcP2P = false)
 {
     public readonly string roomName = roomName;
     public readonly string clientSecret = clientSecret;
@@ -12,4 +12,5 @@ public struct ClientAuthenticate(string roomName, string clientSecret, bool pipe
     /// Defaults to false so older clients (which never send this field) keep relay-only behaviour.
     /// </summary>
     public readonly bool nat = nat;
+    public readonly bool webRtcP2P = webRtcP2P;
 }

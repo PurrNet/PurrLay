@@ -84,7 +84,7 @@ jobs:
           - { region: ewr, prefix: nj-us }
           - { region: nrt, prefix: japan }
           - { region: syd, prefix: australia }
-          - { region: hkg, prefix: china }
+          - { region: sin, prefix: china }
     env:
       RELAY_APP: purrtransport-${{ matrix.prefix }}
     steps:

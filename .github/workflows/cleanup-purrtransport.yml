@@ -22,8 +22,19 @@ jobs:
       APP_SECRET: ${{ secrets.PURR_APP_SECRET }}
     steps:
       - uses: actions/checkout@v7
+      - name: Test retirement safeguards and reporting
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Retire only generations that confirm no remaining sessions
         run: >-
           python3 .github/scripts/fly_generations.py cleanup
           --app purrtransport --domain purrservers.com
+          --report-dir "${{ runner.temp }}/purrtransport-drain-report"
+      - name: Save drain report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: purrtransport-drain-report
+          path: ${{ runner.temp }}/purrtransport-drain-report/
+          if-no-files-found: ignore
+          retention-days: 7

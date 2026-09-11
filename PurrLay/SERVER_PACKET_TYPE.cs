@@ -13,5 +13,6 @@ public enum SERVER_PACKET_TYPE : byte
     /// Payload: [token(UTF8 string, remaining bytes)].
     /// Only sent to peers that authenticated with `nat = true` on UDP V2.
     /// </summary>
-    SERVER_NAT_INTRODUCE = 6
+    SERVER_NAT_INTRODUCE = 6,
+    SERVER_WEBRTC_P2P = 7
 }

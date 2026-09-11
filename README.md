@@ -141,6 +141,23 @@ unreliable messages, and disconnects if reliable traffic cannot be queued. This
 backend does not enable browser-to-native LiteNetLib NAT punching or TURN service.
 Browsers on networks that block the UDP path use the WebSocket fallback.
 
+PurrTransport also has an optional WebRTC P2P setting, disabled by default. Both
+the host and client must enable it. Compatible browsers, and native Unity peers
+with the optional Unity WebRTC adapter installed, can then send all game traffic
+directly while keeping their relay connection for room membership and control.
+The relay negotiates this before gameplay begins and falls back to relay routing
+if the direct attempt fails or takes more than eight seconds. Older clients,
+WebSocket connections, and unsupported native clients remain relay-only. Existing
+native UDP hole punching takes priority when both peers support it.
+
+The chosen route is fixed for the session. A direct connection that subsequently
+fails disconnects cleanly; the game must reconnect or use its host-migration
+handling. Host migration also disconnects clients committed to the previous
+host's direct route. This avoids silently losing or reordering reliable data by
+switching paths during gameplay. No TURN service is included. See the
+[WebRTC P2P protocol](PurrLay/WebRtcP2P.md) for capability negotiation, bounds, and
+compatibility details.
+
 Run `dotnet test PurrLay.sln` for room, migration, mixed-transport framing,
 bridge lifecycle/authentication, and signaling validation. Run `go test ./...`
 in the gateway directory for its transport tests. Build the Docker image from

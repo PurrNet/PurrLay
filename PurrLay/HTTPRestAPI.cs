@@ -63,6 +63,12 @@ public static class HTTPRestAPI
             return _connToUdpVersion.TryGetValue(connId, out var version) && version == 2;
     }
 
+    internal static bool SupportsWebRtcP2P(int connId)
+    {
+        lock (_versionLock)
+            return _connToUdpVersion.TryGetValue(connId, out var version) && version is 2 or 3;
+    }
+
     /// <summary>
     /// Removes the UDP version tracking entry for a disconnected connection.
     /// </summary>

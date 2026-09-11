@@ -122,6 +122,76 @@ def fake_tunnel(app, machine_id):
     yield "private:" + machine_id
 
 
+class HttpDiagnosticsTests(unittest.TestCase):
+    url = "https://api.machines.dev/v1/apps/app/machines"
+
+    def fail_request(self, response, body=None, headers=None, url=None):
+        raw = response if isinstance(response, bytes) else g.json.dumps(response).encode()
+        stream = io.BytesIO(raw)
+        error = g.urllib.error.HTTPError(url or self.url, 400, "Bad Request", {}, stream)
+        with patch.object(g.urllib.request, "build_opener") as opener:
+            opener.return_value.open.side_effect = error
+            with self.assertRaises(g.HttpError) as caught:
+                g.request("POST", url or self.url, body, headers)
+        self.assertEqual(caught.exception.status, 400)
+        self.assertTrue(stream.closed)
+        return str(caught.exception)
+
+    def test_machines_validation_reason_is_visible(self):
+        for response in ({"error": "region hkg is unavailable"},
+                         {"message": "region hkg is unavailable"},
+                         {"error": {"message": "region hkg is unavailable"}}):
+            with self.subTest(response=response):
+                self.assertEqual(self.fail_request(response), f"HTTP 400: {self.url}: region hkg is unavailable")
+
+    def test_error_details_redact_credentials_and_omit_embedded_request_payloads(self):
+        token, secret, environment_secret = "FlyV1 a-private-token", "app-secret-value", "environment-secret-value"
+        body = {"config": {"env": {"SECRET": secret}, "services": [{"checks": [{"headers": [
+            {"name": "internal_key_secret", "values": ["check-header-secret"]}]}]}]}}
+        message = ("region hkg unavailable; " + token + " " + g.urllib.parse.quote(token, safe="") + " " + secret +
+                   " " + environment_secret + " check-header-secret; request={\"unrelated\":\"private-payload\"}")
+        with patch.dict(g.os.environ, {"APP_SECRET": environment_secret}, clear=True):
+            diagnostic = self.fail_request({"error": message, "request": body}, body,
+                                           {"Authorization": "Bearer " + token})
+        self.assertIn("region hkg unavailable", diagnostic)
+        for value in (token, "a-private-token", secret, environment_secret, "check-header-secret", "private-payload"):
+            self.assertNotIn(value, diagnostic)
+        self.assertNotIn("{", diagnostic)
+
+    def test_unrecognized_bearer_or_credential_assignment_is_redacted(self):
+        diagnostic = self.fail_request({"error": "invalid region; Bearer unrecognized-token; password=hidden-value"})
+        self.assertNotIn("unrecognized-token", diagnostic)
+        self.assertNotIn("hidden-value", diagnostic)
+        self.assertIn("invalid region", diagnostic)
+
+    def test_non_json_oversized_or_structured_errors_keep_safe_status_only(self):
+        for response in (b"<html>private upstream details</html>", b"x" * 9000,
+                         {"error": ["private details"]}, ["private details"]):
+            with self.subTest(response_type=type(response).__name__):
+                self.assertEqual(self.fail_request(response), f"HTTP 400: {self.url}")
+
+    def test_details_are_single_line_bounded_and_machines_api_only(self):
+        diagnostic = self.fail_request({"error": "region unavailable\n\r\t" + "x" * 1000})
+        self.assertNotIn("\n", diagnostic)
+        self.assertNotIn("\r", diagnostic)
+        self.assertNotIn("\t", diagnostic)
+        self.assertEqual(len(diagnostic.removeprefix(f"HTTP 400: {self.url}: ")), 512)
+        other_url = "https://relay.example/admin/offer"
+        self.assertEqual(self.fail_request({"error": "private application details"}, url=other_url),
+                         f"HTTP 400: {other_url}")
+
+    def test_error_body_read_is_bounded(self):
+        class RecordingStream(io.BytesIO):
+            def read(self, size=-1):
+                self.requested_size = size
+                return super().read(size)
+        stream = RecordingStream(b"x" * 10000)
+        error = g.urllib.error.HTTPError(self.url, 400, "Bad Request", {}, stream)
+        self.assertIsNone(g.machine_api_error_detail(error, None, None))
+        self.assertEqual(stream.requested_size, 8193)
+        self.assertTrue(stream.closed)
+
+
 class ProxyTests(unittest.TestCase):
     child_code = """
 import socket, sys, threading

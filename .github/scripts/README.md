@@ -16,6 +16,11 @@ The existing `purrtransport` app and its seven regional apps must already exist 
 
 Old clients can cache regional hostnames. Every generation therefore stays in its existing regional app and uses the existing custom hostname and dedicated IPv4. The allocator reserves a free five-port block between 20000 and 59999, including all services on stopped Machines and all port ranges. Incomplete Machine configuration prevents allocation.
 
+The `china` app now deploys in Singapore (`sin`), where its existing relay runs.
+Fly [retired Hong Kong (`hkg`)](https://fly.io/blog/the-region-consolidation-project/)
+and rejects new Machines there. The app name, hostname and client region identifier
+remain `china` for compatibility.
+
 | External port | Internal port | Service |
 | --- | --- | --- |
 | base | 8081 | Relay HTTPS API; Fly terminates TLS and HTTP |
@@ -51,6 +56,28 @@ The explicit initial cutover requires exactly one started unowned balancer and n
 An interrupted initial cutover resumes its original Machine and volume from recorded metadata even if the next Action leaves the option disabled. A lost stop acknowledgement is reconciled against the retained legacy Machine. No private-connectivity error or failed handoff ever enables this mode automatically. The legacy relay Machines stay running and remain excluded from automatic cleanup because they have no supported retirement protocol. If the normal handoff path encounters a reachable legacy predecessor instead, it retains that source as a private directory dependency; such dependencies must remain running.
 
 ## Retirement and failed runs
+
+Open a **Retire drained Purr Transport generations** run's **Summary** to see the
+drain report. It lists every inventoried Machine, its generation, state and phase
+at the start of cleanup, whether it was retired or kept, and the reason. Draining
+relays also show the last checked room, reservation, transport connection, pipe
+connection and pending offer counts. `?` means the counter was unavailable;
+active and legacy Machines are not probed for these counters.
+
+The same report is printed in the log and saved as Markdown and JSON in the
+**purrtransport-drain-report** artifact for seven days. Reports are written even
+when cleanup raises an error, with unvisited apps and Machines marked as not
+checked. A runner being forcibly terminated may prevent the final report write.
+A successful workflow can keep Machines; **Needs review** identifies API failures
+or missing proof, including rate limits that can be retried on the next run.
+
+Two Machines in a region commonly mean an active generation plus a draining or
+legacy predecessor. Managed predecessors retire automatically once empty. Legacy
+Machines lack the supported retirement protocol and are retained indefinitely,
+even when idle; the report explicitly calls out this one-time review requirement.
+They must not be assumed empty from their age or the newer Machine's presence.
+If Machine deletion succeeds but owned-volume cleanup fails, the report records
+the Machine as retired and identifies the volume requiring inspection.
 
 Cleanup requires a healthy authoritative balancer. It excludes active relay endpoints and unowned Machines. If deployment stopped after central activation but before draining the previous relay, cleanup can finish draining only when the registry explicitly identifies that endpoint and deployment as superseded. An absent registry entry is not proof of supersession.
 
