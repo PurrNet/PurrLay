@@ -46,3 +46,11 @@ primary_region = 'ewr'
   memory = '512mb'
   cpu_kind = 'shared'
   cpus = 1
+
+# Shared WebRTC ICE socket; WEBRTC_PUBLIC_IP must advertise this app's dedicated IPv4.
+[[services]]
+  internal_port = 7779
+  protocol = "udp"
+  processes = ["app"]
+  [[services.ports]]
+    port = 7779

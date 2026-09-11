@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using PurrBalancer;
 using WatsonWebserver.Core;
@@ -12,15 +13,16 @@ public static class HTTPRestAPI
     public static WebSockets? webServer;
     public static IUdpServer? udpServerV1;
     public static IUdpServer? udpServerV2;
+    public static IUdpServer? webRtcServer;
+    internal static WebRtcGatewayRuntime? webRtcRuntime;
 
     /// <summary>
-    /// Maps global connection IDs to which UDP version they connected through.
-    /// 1 = V1 (LiteNetLib 1.x), 2 = V2 (LiteNetLib 2.x).
+    /// Delivery-framed connection backends: 1 = LiteNetLib V1, 2 = V2, 3 = WebRTC.
     /// </summary>
     static readonly Dictionary<int, int> _connToUdpVersion = new();
     static readonly object _versionLock = new();
 
-    static UdpServerCallbacks CreateCallbacks(int version) => new()
+    internal static UdpServerCallbacks CreateCallbacks(int version) => new()
     {
         ReserveConnId = isUdp =>
         {
@@ -47,7 +49,7 @@ public static class HTTPRestAPI
             if (!_connToUdpVersion.TryGetValue(connId, out version))
                 return udpServerV1; // fallback to V1
         }
-        return version == 2 ? udpServerV2 : udpServerV1;
+        return version switch { 2 => udpServerV2, 3 => webRtcServer, _ => udpServerV1 };
     }
 
     /// <summary>
@@ -153,6 +155,7 @@ public static class HTTPRestAPI
         public int port;
         public int udpPort;
         public int udpPortV2;
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)] public string? webRtcUrl;
     }
 
     [Serializable]
@@ -163,6 +166,7 @@ public static class HTTPRestAPI
         public int port;
         public int udpPort;
         public int udpPortV2;
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)] public string? webRtcUrl;
         public string? roomName;
         public int generation;
         public string? fencingToken;
@@ -177,10 +181,19 @@ public static class HTTPRestAPI
 
         string path = req.Url.RawWithoutQuery;
 
+        if (req.Method == WatsonWebserver.Core.HttpMethod.OPTIONS)
+            return new ApiResponse(HttpStatusCode.NoContent);
+
         switch (path)
         {
             case "/": return new ApiResponse(DateTime.Now.ToString(CultureInfo.InvariantCulture));
             case "/ping": return new ApiResponse(HttpStatusCode.OK);
+            case "/webrtc/offer":
+                if (req.Method != WatsonWebserver.Core.HttpMethod.POST)
+                    return new ApiResponse(HttpStatusCode.MethodNotAllowed);
+                return webRtcRuntime is { Available: true } runtime
+                    ? await runtime.OfferAsync(req)
+                    : ApiResponse.FromError("WebRTC is unavailable.", HttpStatusCode.ServiceUnavailable);
             case "/getJoinDetails": return GetJoinDetails(req);
             case "/allocate_ws": return await AllocateWebSockets(req);
             case "/migration/claim": return ClaimMigration(req);
@@ -270,7 +283,8 @@ public static class HTTPRestAPI
             port = webServer.port,
             secret = secret,
             udpPort = Program.UDP_PORT,
-            udpPortV2 = Program.UDP_PORT_V2
+            udpPortV2 = Program.UDP_PORT_V2,
+            webRtcUrl = webRtcRuntime?.PublicUrl
         }));
     }
 
@@ -295,7 +309,8 @@ public static class HTTPRestAPI
             port = webServer.port,
             secret = room.clientSecret,
             udpPort = Program.UDP_PORT,
-            udpPortV2 = Program.UDP_PORT_V2
+            udpPortV2 = Program.UDP_PORT_V2,
+            webRtcUrl = webRtcRuntime?.PublicUrl
         }));
     }
 
@@ -334,6 +349,7 @@ public static class HTTPRestAPI
             secret = secret,
             udpPort = Program.UDP_PORT,
             udpPortV2 = Program.UDP_PORT_V2,
+            webRtcUrl = webRtcRuntime?.PublicUrl,
             roomName = snapshot.name,
             generation = snapshot.generation,
             fencingToken = snapshot.fencingToken,

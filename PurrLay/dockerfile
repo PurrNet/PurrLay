@@ -1,3 +1,10 @@
+FROM golang:1.26 AS gateway-build
+WORKDIR /gateway
+COPY PurrLay.WebRtcGateway/go.mod PurrLay.WebRtcGateway/go.sum ./
+RUN go mod download
+COPY PurrLay.WebRtcGateway/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /PurrLay.WebRtcGateway .
+
 # Build stage
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
@@ -9,12 +16,17 @@ RUN dotnet publish -c Release -o /app
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
 WORKDIR /app
 COPY --from=build /app .
+COPY --from=gateway-build /PurrLay.WebRtcGateway ./PurrLay.WebRtcGateway
+COPY --from=gateway-build /gateway/THIRD_PARTY_NOTICES.txt ./PurrLay.WebRtcGateway.THIRD_PARTY_NOTICES.txt
 
 ENV HOST=+
 ENV PORT=8081
+ENV WEBRTC_ENABLED=true
+ENV WEBRTC_UDP_PORT=7779
 
 EXPOSE ${PORT}
 EXPOSE 7777/udp
 EXPOSE 7778/udp
+EXPOSE 7779/udp
 
 ENTRYPOINT ["dotnet", "PurrLay.dll"]

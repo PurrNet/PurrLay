@@ -166,6 +166,9 @@ internal static class Program
             if (Env.TryGetValue("SECRET", out var secret) && secret != null)
                 SECRET_INTERNAL = secret;
 
+            HTTPRestAPI.webRtcRuntime = WebRtcGatewayRuntime.StartAsync().GetAwaiter().GetResult();
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => HTTPRestAPI.webRtcRuntime?.Dispose();
+
             RegisterRelayToBalancer();
 
             var host = Env.TryGetValueOrDefault("HOST", "localhost");

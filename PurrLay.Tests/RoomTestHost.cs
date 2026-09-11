@@ -196,18 +196,20 @@ internal sealed class RoomTestHost : IAsyncDisposable
         return Assert.IsType<Room>(room);
     }
 
-    public PlayerInfo Authenticate(string secret, bool success = true)
+    public PlayerInfo Authenticate(string secret, bool success = true, int backend = 1, bool nat = false)
     {
-        var player = new PlayerInfo(Transport.ReserveConnId(true), true);
+        var player = new PlayerInfo(HTTPRestAPI.CreateCallbacks(backend).ReserveConnId(true), true);
         _players.Add(player);
         var data = Encoding.UTF8.GetBytes(new JObject
         {
             ["roomName"] = Name,
-            ["clientSecret"] = secret
+            ["clientSecret"] = secret,
+            ["nat"] = nat
         }.ToString());
         Transport.OnServerReceivedData(player, data);
         var expected = success ? SERVER_PACKET_TYPE.SERVER_AUTHENTICATED : SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED;
-        Assert.Contains(Udp.Packets, packet => packet.Connection == player.connId && packet.Data[0] == (byte)expected);
+        var recorder = Assert.IsType<RecordingUdpServer>(HTTPRestAPI.GetUdpServerForConnection(player.connId));
+        Assert.Contains(recorder.Packets, packet => packet.Connection == player.connId && packet.Data[0] == (byte)expected);
         return player;
     }
 
@@ -276,8 +278,8 @@ internal sealed class RoomTestHost : IAsyncDisposable
 
     internal sealed class RecordingUdpServer : IUdpServer
     {
-        public ConcurrentQueue<(int Connection, byte[] Data)> Packets { get; } = new();
-        public void SendOne(int connId, ReadOnlySpan<byte> data, byte deliveryMethod) => Packets.Enqueue((connId, data.ToArray()));
+        public ConcurrentQueue<(int Connection, byte[] Data, byte Method)> Packets { get; } = new();
+        public void SendOne(int connId, ReadOnlySpan<byte> data, byte deliveryMethod) => Packets.Enqueue((connId, data.ToArray(), deliveryMethod));
         public void KickClient(int connId) { }
     }
 }

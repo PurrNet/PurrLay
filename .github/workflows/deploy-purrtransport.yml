@@ -17,7 +17,7 @@ jobs:
     name: Build Balancer
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Ensure app exists
@@ -125,7 +125,7 @@ jobs:
             prefix: china
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Ensure app exists
@@ -133,6 +133,34 @@ jobs:
           RELAY_APP="${APP_NAME}-${{ matrix.prefix }}"
           echo "Ensuring relay app $RELAY_APP exists in region ${{ matrix.region }}"
           flyctl apps create $RELAY_APP 2>/dev/null || echo "Relay app $RELAY_APP already exists"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Ensure IPs allocated
+        id: relay_network
+        run: |
+          RELAY_APP="${APP_NAME}-${{ matrix.prefix }}"
+          IPS=$(flyctl ips list --app "$RELAY_APP" --json)
+
+          # Public UDP needs a dedicated IPv4; shared_v4 does not qualify.
+          if ! jq -e '.[] | select(.Type=="v4")' <<< "$IPS" > /dev/null; then
+            echo "No dedicated IPv4 found, allocating one..."
+            flyctl ips allocate-v4 --app "$RELAY_APP" --yes
+            IPS=$(flyctl ips list --app "$RELAY_APP" --json)
+          else
+            echo "Dedicated IPv4 already exists for $RELAY_APP"
+          fi
+
+          # Supply ICE candidates on the gateway's first boot.
+          WEBRTC_PUBLIC_IP=$(jq -er '[.[] | select(.Type=="v4") | .Address] | if length > 0 then join(",") else error("No dedicated IPv4 available") end' <<< "$IPS")
+          echo "public_ip=$WEBRTC_PUBLIC_IP" >> "$GITHUB_OUTPUT"
+
+          if ! jq -e '.[] | select(.Type=="v6")' <<< "$IPS" > /dev/null; then
+            echo "No IPv6 found, allocating one..."
+            flyctl ips allocate-v6 --app "$RELAY_APP"
+          else
+            echo "IPv6 already exists for $RELAY_APP"
+          fi
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
@@ -146,34 +174,14 @@ jobs:
             --env HOST_DOMAIN="${APP_NAME}-${{ matrix.prefix }}.${APP_DOMAIN}" \
             --env HOST_REGION=${{ matrix.prefix }} \
             --env HOST_SSL="true" \
+            --env WEBRTC_PUBLIC_IP="$WEBRTC_PUBLIC_IP" \
             --env SECRET="${APP_SECRET}"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          WEBRTC_PUBLIC_IP: ${{ steps.relay_network.outputs.public_ip }}
 
       - name: Ensure cert exists
         run: flyctl certs create "${APP_NAME}-${{ matrix.prefix }}.${APP_DOMAIN}" --app "${APP_NAME}-${{ matrix.prefix }}" || true
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-      - name: Ensure IPs allocated
-        run: |
-          RELAY_APP="${APP_NAME}-${{ matrix.prefix }}"
-
-          # Ensure IPv4
-          if ! flyctl ips list --app $RELAY_APP --json | jq -e '.[] | select(.Type=="v4")' > /dev/null; then
-            echo "No IPv4 found, allocating one..."
-            flyctl ips allocate-v4 --app $RELAY_APP --yes
-          else
-            echo "IPv4 already exists for $RELAY_APP"
-          fi
-
-          # Ensure IPv6
-          if ! flyctl ips list --app $RELAY_APP --json | jq -e '.[] | select(.Type=="v6")' > /dev/null; then
-            echo "No IPv6 found, allocating one..."
-            flyctl ips allocate-v6 --app $RELAY_APP
-          else
-            echo "IPv6 already exists for $RELAY_APP"
-          fi
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
