@@ -38,6 +38,12 @@ already created by an earlier attempt.
 
 The balancer listens on both public IPv4 and its exact private IPv6 hostname, sharing the same directory. Startup waits for private IPv6 DNS before opening either listener. The successor starts cordoned. It contacts the predecessor through the exact `<machine-id>.vm.<app>.internal:8080` address, receives the registry, and completes a fenced handoff before reporting ready. The workflow probes this exact Machine using `flyctl proxy` with the remote Machine hostname and port in its HTTP `Host` header, uncordons it, verifies public routing to its process identity, and then cordons the predecessor. Cordoned predecessors remain accessible over the private network. The successor stays marked `standby` until predecessor finalization is complete, so interrupted Actions finish that work before creating another generation.
 
+The controller waits for a newly created or restarted balancer to reach Fly's
+`started` state before opening its private proxy. If private DNS is still
+propagating and the proxy exits, it starts a fresh proxy within a bounded startup
+deadline. Exhausting that deadline retains the candidate and its volume for a
+retry; it does not replace the candidate or stop the predecessor.
+
 Each new balancer generation has a dedicated encrypted 1 GB Fly volume mounted at `/data`; `BALANCER_STATE_PATH` stores its checkpoint there. A process restart uses that checkpoint. A retry for an already-created generation reuses its Machine and attached volume; an uncertain volume or Machine create is reconciled by its deterministic generation name before another mutation is considered.
 
 The explicit initial cutover requires exactly one started unowned balancer and no owned generation, including stopped Machines. It verifies that exact public Machine returns a missing admin API and a valid, unambiguous relay registry. It records the cutover mode, predecessor ID and image on the candidate before creation. Only after the new private and public probes pass does it cordon and stop that exact unchanged legacy balancer. There is no legacy directory dependency in the new checkpoint. Old relays register with the new balancer on their next heartbeat, so its regional list can briefly be empty. New rooms then use the new directory while the regional rollout replaces their allocation targets.

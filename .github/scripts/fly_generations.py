@@ -278,34 +278,60 @@ def private_url(app, machine_id):
     return "http://" + private_host(app, machine_id)
 
 
-@contextlib.contextmanager
-def tunnel(app, machine_id):
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-    host = f"{machine_id}.vm.{app}.internal"
-    process = subprocess.Popen(["flyctl", "proxy", f"{port}:8080", host, "--app", app,
-                                "--bind-addr", "127.0.0.1", "--watch-stdin"],
-                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+def stop_proxy(process):
     try:
-        def listening():
-            if process.poll() is not None:
-                raise DeploymentError(f"Private proxy exited for {app}/{machine_id}")
-            with socket.create_connection(("127.0.0.1", port), timeout=1):
-                return True
-        wait_for(listening, f"private proxy for {machine_id}", timeout=45, interval=1)
-        yield f"http://127.0.0.1:{port}"
-    finally:
         process.stdin.close()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.terminate()
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            process.kill()
+            process.wait(timeout=5)
+
+
+@contextlib.contextmanager
+def tunnel(app, machine_id, startup_timeout=180, retry_interval=2, *, clock=time.monotonic, sleep=time.sleep):
+    deadline = clock() + startup_timeout
+    delay = retry_interval
+    last_error = "not listening"
+    host = f"{machine_id}.vm.{app}.internal"
+    while clock() < deadline:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        process = subprocess.Popen(["flyctl", "proxy", f"{port}:8080", host, "--app", app,
+                                    "--bind-addr", "127.0.0.1", "--watch-stdin"],
+                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+        try:
+            attempt_deadline = min(deadline, clock() + 30)
+            while clock() < attempt_deadline:
+                if process.poll() is not None:
+                    last_error = f"proxy exited with code {process.returncode}"
+                    break
+                try:
+                    probe_timeout = min(0.2, max(0.01, attempt_deadline - clock()))
+                    with socket.create_connection(("127.0.0.1", port), timeout=probe_timeout):
+                        pass
+                except OSError as error:
+                    last_error = type(error).__name__
+                else:
+                    if process.poll() is None:
+                        yield f"http://127.0.0.1:{port}"
+                        return
+                sleep(min(0.2, max(0, attempt_deadline - clock())))
+        finally:
+            stop_proxy(process)
+        remaining = deadline - clock()
+        if remaining > 0:
+            print(f"Retrying private proxy for {app}/{machine_id}: {last_error}", file=sys.stderr)
+            sleep(min(delay, remaining))
+            delay = min(delay * 2, 10)
+    raise DeploymentError(f"Timed out starting private proxy for {app}/{machine_id}: {last_error}")
 
 
 def status_ready(admin, endpoint, deployment=None, host=None):
@@ -454,8 +480,6 @@ def deploy_balancer(fly, admin, args, open_tunnel=tunnel, resume_pending=True):
         predecessor_id = metadata(machine).get("purr_predecessor")
         if machine["state"] == "stopped":
             fly.action(args.app, machine["id"], "start")
-            wait_for(lambda: fly.get(args.app, machine["id"])["state"] == "started",
-                     f"unfinished balancer {args.app}/{machine['id']} to restart", timeout=180)
     else:
         predecessor = (initial_legacy_predecessor(fly, admin, args) if initial_cutover else
                        find_predecessor(fly, admin, args.app, open_tunnel=open_tunnel))
@@ -472,6 +496,8 @@ def deploy_balancer(fly, admin, args, open_tunnel=tunnel, resume_pending=True):
             config["metadata"].update(purr_initial_legacy_cutover="true",
                                        purr_legacy_image=predecessor["config"]["image"])
         machine = fly.create(args.app, args.deployment, "balancer", args.region, config, cordoned=True)
+    wait_for(lambda: fly.get(args.app, machine["id"])["state"] == "started",
+             f"balancer {args.app}/{machine['id']} to start before private DNS discovery", timeout=180)
     with open_tunnel(args.app, machine["id"]) as endpoint:
         status = wait_for(lambda: status_ready(admin, endpoint, args.deployment,
                                               host=private_host(args.app, machine["id"])),

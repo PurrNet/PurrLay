@@ -1,6 +1,9 @@
 import contextlib
 import copy
 import io
+import socket
+import subprocess
+import sys
 import types
 import unittest
 from unittest.mock import patch
@@ -117,6 +120,99 @@ def once(probe, description, **kwargs):
 @contextlib.contextmanager
 def fake_tunnel(app, machine_id):
     yield "private:" + machine_id
+
+
+class ProxyTests(unittest.TestCase):
+    child_code = """
+import socket, sys, threading
+if sys.argv[2] == 'exit':
+    sys.exit(23)
+if sys.argv[2] == 'listen':
+    listener = socket.socket()
+    listener.bind(('127.0.0.1', int(sys.argv[1])))
+    listener.listen()
+    def accept():
+        while True:
+            connection, _ = listener.accept()
+            connection.close()
+    threading.Thread(target=accept, daemon=True).start()
+sys.stdin.buffer.read()
+"""
+
+    def setUp(self):
+        self.processes = []
+        self.real_popen = subprocess.Popen
+        self.stderr = contextlib.redirect_stderr(io.StringIO())
+        self.stderr.__enter__()
+
+    def tearDown(self):
+        self.stderr.__exit__(None, None, None)
+        for process in self.processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=3)
+
+    def launch(self, command, mode, **kwargs):
+        self.assertEqual(command[0:2], ["flyctl", "proxy"])
+        self.assertEqual(command[3], "exact-machine.vm.app.internal")
+        self.assertEqual(command[4:], ["--app", "app", "--bind-addr", "127.0.0.1", "--watch-stdin"])
+        local_port, remote_port = command[2].split(":")
+        self.assertEqual(remote_port, "8080")
+        process = self.real_popen([sys.executable, "-c", self.child_code, local_port, mode], **kwargs)
+        self.processes.append(process)
+        return process
+
+    def assert_reaped(self):
+        self.assertTrue(self.processes)
+        self.assertTrue(all(process.poll() is not None for process in self.processes))
+        self.assertTrue(all(process.stdin.closed for process in self.processes))
+
+    def test_exited_proxy_is_relaunched_and_real_socket_becomes_available(self):
+        def launch(command, **kwargs):
+            return self.launch(command, "exit" if not self.processes else "listen", **kwargs)
+        with patch.object(g.subprocess, "Popen", side_effect=launch):
+            with g.tunnel("app", "exact-machine", startup_timeout=3, retry_interval=0.01) as endpoint:
+                port = int(endpoint.rsplit(":", 1)[1])
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    pass
+                self.assertEqual(len(self.processes), 2)
+                self.assertEqual(self.processes[0].returncode, 23)
+        self.assert_reaped()
+
+    def test_repeated_proxy_exits_exhaust_one_deadline_without_orphans(self):
+        elapsed = 0
+        def sleep(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+        def exited(command, **kwargs):
+            process = self.launch(command, "exit", **kwargs)
+            process.wait(timeout=3)
+            return process
+        with patch.object(g.subprocess, "Popen", side_effect=exited):
+            with self.assertRaisesRegex(g.DeploymentError, "Timed out starting private proxy"):
+                with g.tunnel("app", "exact-machine", startup_timeout=1.2, retry_interval=0.2,
+                              clock=lambda: elapsed, sleep=sleep):
+                    self.fail("An exited proxy cannot provide a tunnel")
+        self.assertAlmostEqual(elapsed, 1.2)
+        self.assertEqual(len(self.processes), 3)
+        self.assert_reaped()
+
+    def test_live_proxy_that_never_listens_is_stopped_at_deadline(self):
+        with patch.object(g.subprocess, "Popen", side_effect=lambda command, **kwargs:
+                          self.launch(command, "wait", **kwargs)):
+            with self.assertRaisesRegex(g.DeploymentError, "Timed out starting private proxy"):
+                with g.tunnel("app", "exact-machine", startup_timeout=0.3, retry_interval=0.01):
+                    self.fail("A child without a listening socket cannot provide a tunnel")
+        self.assert_reaped()
+
+    def test_caller_failure_closes_proxy_without_replaying_caller(self):
+        with patch.object(g.subprocess, "Popen", side_effect=lambda command, **kwargs:
+                          self.launch(command, "listen", **kwargs)):
+            with self.assertRaisesRegex(RuntimeError, "caller failed"):
+                with g.tunnel("app", "exact-machine", startup_timeout=3, retry_interval=0.01):
+                    raise RuntimeError("caller failed")
+        self.assertEqual(len(self.processes), 1)
+        self.assert_reaped()
 
 
 class PortTests(unittest.TestCase):
@@ -535,6 +631,47 @@ class InitialCutoverTests(unittest.TestCase):
         self.assertEqual(self.fly.items["legacy"]["state"], "stopped")
         self.assertEqual(set(self.fly.items), {"legacy", "new"})
         self.assertFalse(any(event[0] == "destroy" for event in self.fly.events))
+
+    def test_created_machine_must_start_before_opening_private_proxy(self):
+        original_create = self.fly.create
+        def created(*args, **kwargs):
+            machine = original_create(*args, **kwargs)
+            self.fly.items["new"]["state"] = machine["state"] = "starting"
+            return machine
+        def wait_started(probe, description, **kwargs):
+            if "before private DNS discovery" in description:
+                self.assertFalse(probe())
+                self.fly.items["new"]["state"] = "started"
+                self.assertTrue(probe())
+                self.fly.events.append(("machine-started", "new"))
+                return True
+            return once(probe, description, **kwargs)
+        @contextlib.contextmanager
+        def after_start(app, machine_id):
+            self.assertIn(("machine-started", machine_id), self.fly.events)
+            self.assertEqual(self.fly.items[machine_id]["state"], "started")
+            yield "private:" + machine_id
+        with patch.object(self.fly, "create", side_effect=created), \
+                patch.object(g, "wait_for", side_effect=wait_started), \
+                patch.object(g, "request", side_effect=self.public_request):
+            g.deploy_balancer(self.fly, self.admin, self.args, after_start)
+
+    def test_machine_start_failure_preserves_candidate_and_predecessor(self):
+        original_create = self.fly.create
+        def created(*args, **kwargs):
+            machine = original_create(*args, **kwargs)
+            self.fly.items["new"]["state"] = machine["state"] = "starting"
+            return machine
+        with patch.object(self.fly, "create", side_effect=created), \
+                patch.object(g, "wait_for", once), \
+                patch.object(g, "request", side_effect=self.public_request):
+            with self.assertRaisesRegex(g.DeploymentError, "before private DNS discovery"):
+                g.deploy_balancer(self.fly, self.admin, self.args,
+                                 lambda *_: self.fail("Proxy opened before Machine started"))
+        self.assertEqual(set(self.fly.items), {"legacy", "new"})
+        self.assertEqual(g.metadata(self.fly.items["new"])["purr_phase"], "standby")
+        self.assertNotIn(("cordon", "legacy"), self.fly.events)
+        self.assertNotIn(("stop", "legacy"), self.fly.events)
 
     def test_ambiguous_or_owned_sources_block_cutover_before_any_mutation(self):
         other_legacy = copy.deepcopy(self.old)
