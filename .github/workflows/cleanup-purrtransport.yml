@@ -3,7 +3,7 @@ name: Retire drained Purr Transport generations
 on:
   workflow_dispatch:
   schedule:
-    - cron: '3-58/5 * * * *'
+    - cron: '17 * * * *'
 
 concurrency:
   group: purrtransport-production-generations
