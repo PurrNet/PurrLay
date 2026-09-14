@@ -266,9 +266,8 @@ def relay_config(image, deployment, host, region, balancer, public_ip, base, sec
         "WEBSOCKETS_PORT": str(base + 1), "WEBRTC_ENABLED": "true",
         "WEBRTC_UDP_PORT": str(base + 4), "WEBRTC_PUBLIC_IP": public_ip,
         "RELAY_DEPLOYMENT_ID": deployment, "RELAY_START_STANDBY": "true", "SECRET": secret})
-    if region == "france":
-        # Avoid shared-CPU quota throttling; performance CPUs require at least 2 GB.
-        config["guest"] = {"cpu_kind": "performance", "cpus": 1, "memory_mb": 2048}
+    if region in ("france", "brazil"):
+        config["guest"] = {"cpu_kind": "shared", "cpus": 4, "memory_mb": 1024}
     config["services"] = [service("tcp", 8081, base, ["tls", "http"]),
                           service("tcp", base + 1, base + 1, ["tls"])]
     config["services"] += [service("udp", port, port) for port in range(base + 2, base + 5)]

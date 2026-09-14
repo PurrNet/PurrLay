@@ -286,12 +286,12 @@ sys.stdin.buffer.read()
 
 
 class MachineSizingTests(unittest.TestCase):
-    def test_only_france_relays_use_performance_cpu(self):
+    def test_only_france_and_brazil_relays_use_four_shared_cpus(self):
         for _, region in g.REGIONS:
             with self.subTest(region=region):
                 config = g.relay_config("image", "new", "relay.example", region, "https://balancer",
                                         "192.0.2.1", 20000, "secret")
-                expected = {"cpu_kind": "performance", "cpus": 1, "memory_mb": 2048} if region == "france" else {
+                expected = {"cpu_kind": "shared", "cpus": 4, "memory_mb": 1024} if region in ("france", "brazil") else {
                     "cpu_kind": "shared", "cpus": 1, "memory_mb": 512}
                 self.assertEqual(config["guest"], expected)
         self.assertEqual(g.balancer_config("image", "new", None, "secret")["guest"],
@@ -558,19 +558,25 @@ class DeploymentTests(unittest.TestCase):
 
     @patch.object(g, "wait_for", once)
     def test_activation_is_acknowledged_before_draining_previous_relay(self):
-        old = relay()
-        old["config"]["guest"] = {"cpu_kind": "shared", "cpus": 1, "memory_mb": 512}
-        fly = FakeFly([old])
-        new_endpoint = "https://relay.example:20005"
-        admin = FakeAdmin({new_endpoint: status("new"), "https://relay.example:20000": status(),
-                           "https://balancer": authority(new_endpoint)})
-        g.deploy_relay(fly, admin, self.relay_args())
-        self.assertEqual([event[0] for event in admin.events], ["activate", "/admin/activateRelay", "drain"])
-        self.assertEqual(g.metadata(fly.items["old"])["purr_phase"], "draining")
-        self.assertEqual(fly.items["new"]["config"]["guest"],
-                         {"cpu_kind": "performance", "cpus": 1, "memory_mb": 2048})
-        self.assertEqual(fly.items["old"]["config"]["guest"], old["config"]["guest"])
-        self.assertNotIn(("destroy", "old"), fly.events)
+        for region, prefix in (("cdg", "france"), ("gru", "brazil")):
+            with self.subTest(region=region):
+                args = self.relay_args()
+                args.region, args.prefix = region, prefix
+                old = relay()
+                old["config"]["env"]["HOST_REGION"] = prefix
+                old["config"]["guest"] = {"cpu_kind": "performance", "cpus": 1, "memory_mb": 2048}
+                fly = FakeFly([old])
+                new_endpoint = "https://relay.example:20005"
+                admin = FakeAdmin({new_endpoint: status("new"),
+                                   "https://relay.example:20000": status(roomCount=3),
+                                   "https://balancer": authority(new_endpoint)})
+                g.deploy_relay(fly, admin, args)
+                self.assertEqual([event[0] for event in admin.events], ["activate", "/admin/activateRelay", "drain"])
+                self.assertEqual(g.metadata(fly.items["old"])["purr_phase"], "draining")
+                self.assertEqual(fly.items["new"]["config"]["guest"],
+                                 {"cpu_kind": "shared", "cpus": 4, "memory_mb": 1024})
+                self.assertEqual(fly.items["old"]["config"]["guest"], old["config"]["guest"])
+                self.assertNotIn(("destroy", "old"), fly.events)
 
     @patch.object(g, "wait_for", once)
     def test_failed_handoff_never_cordons_predecessor(self):
