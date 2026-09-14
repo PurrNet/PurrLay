@@ -26,6 +26,12 @@ Fly [retired Hong Kong (`hkg`)](https://fly.io/blog/the-region-consolidation-pro
 and rejects new Machines there. The app name, hostname and client region identifier
 remain `china` for compatibility.
 
+New France (`cdg`) relay generations use one performance vCPU with 2048 MB RAM
+to avoid shared-CPU quota throttling. The other relay regions and the balancer
+use one shared vCPU with 512 MB RAM. This policy lives in `relay_config` in
+`fly_generations.py`; changing it applies to new generations, while existing
+rooms continue on their original Machines until normal retirement.
+
 | External port | Internal port | Service |
 | --- | --- | --- |
 | base | 8081 | Relay HTTPS API; Fly terminates TLS and HTTP |

@@ -285,6 +285,19 @@ sys.stdin.buffer.read()
         self.assert_reaped()
 
 
+class MachineSizingTests(unittest.TestCase):
+    def test_only_france_relays_use_performance_cpu(self):
+        for _, region in g.REGIONS:
+            with self.subTest(region=region):
+                config = g.relay_config("image", "new", "relay.example", region, "https://balancer",
+                                        "192.0.2.1", 20000, "secret")
+                expected = {"cpu_kind": "performance", "cpus": 1, "memory_mb": 2048} if region == "france" else {
+                    "cpu_kind": "shared", "cpus": 1, "memory_mb": 512}
+                self.assertEqual(config["guest"], expected)
+        self.assertEqual(g.balancer_config("image", "new", None, "secret")["guest"],
+                         {"cpu_kind": "shared", "cpus": 1, "memory_mb": 512})
+
+
 class PortTests(unittest.TestCase):
     def test_reserves_stopped_machines_and_ranges_across_protocols(self):
         machines = [relay(state="stopped")]
@@ -545,13 +558,18 @@ class DeploymentTests(unittest.TestCase):
 
     @patch.object(g, "wait_for", once)
     def test_activation_is_acknowledged_before_draining_previous_relay(self):
-        fly = FakeFly([relay()])
+        old = relay()
+        old["config"]["guest"] = {"cpu_kind": "shared", "cpus": 1, "memory_mb": 512}
+        fly = FakeFly([old])
         new_endpoint = "https://relay.example:20005"
         admin = FakeAdmin({new_endpoint: status("new"), "https://relay.example:20000": status(),
                            "https://balancer": authority(new_endpoint)})
         g.deploy_relay(fly, admin, self.relay_args())
         self.assertEqual([event[0] for event in admin.events], ["activate", "/admin/activateRelay", "drain"])
         self.assertEqual(g.metadata(fly.items["old"])["purr_phase"], "draining")
+        self.assertEqual(fly.items["new"]["config"]["guest"],
+                         {"cpu_kind": "performance", "cpus": 1, "memory_mb": 2048})
+        self.assertEqual(fly.items["old"]["config"]["guest"], old["config"]["guest"])
         self.assertNotIn(("destroy", "old"), fly.events)
 
     @patch.object(g, "wait_for", once)
