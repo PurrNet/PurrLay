@@ -170,6 +170,10 @@ namespace LiteNetLib
         /// </summary>
         internal long ConnectTime => _connectTime;
 
+        // Both ends enabled LiteNetManager.ReliableRepairs, so reliable channels mark resends and send
+        // repairs. Settled by the handshake; receivers understand both formats either way.
+        internal bool UsesRepairs { get; private set; }
+
         /// <summary>
         /// Peer id can be used as key in your dictionary of peers
         /// </summary>
@@ -417,6 +421,8 @@ namespace LiteNetLib
             : this(netManager, remoteEndPoint, id)
         {
             _connectTime = DateTime.UtcNow.Ticks;
+            if (netManager.ReliableRepairs)
+                _connectTime |= NetConnectRequestPacket.RepairsOffer;
             _connectionState = ConnectionState.Outgoing;
             ConnectionNum = connectNum;
 
@@ -437,9 +443,10 @@ namespace LiteNetLib
             _connectTime = request.InternalPacket.ConnectionTime;
             ConnectionNum = request.InternalPacket.ConnectionNumber;
             RemoteId = request.InternalPacket.PeerId;
+            UsesRepairs = request.InternalPacket.OffersRepairs && netManager.ReliableRepairs;
 
             //Make initial packet
-            _connectAcceptPacket = NetConnectAcceptPacket.Make(_connectTime, ConnectionNum, id);
+            _connectAcceptPacket = NetConnectAcceptPacket.Make(_connectTime, ConnectionNum, id, UsesRepairs);
 
             //Make Connected
             _connectionState = ConnectionState.Connected;
@@ -472,6 +479,7 @@ namespace LiteNetLib
             //check connect num
             ConnectionNum = packet.ConnectionNumber;
             RemoteId = packet.PeerId;
+            UsesRepairs = packet.Repairs && (_connectTime & NetConnectRequestPacket.RepairsOffer) != 0;
 
             NetDebug.Write(NetLogLevel.Trace, "[NC] Received connection accept");
             Interlocked.Exchange(ref _timeSinceLastPacket, 0);
@@ -485,7 +493,13 @@ namespace LiteNetLib
         /// <param name="options">Type of packet that you want send</param>
         /// <returns>size in bytes</returns>
         public int GetMaxSinglePacketSize(DeliveryMethod options) =>
-            _mtu - NetPacket.GetHeaderSize(options == DeliveryMethod.Unreliable ? PacketProperty.Unreliable : PacketProperty.Channeled);
+            PacketSizeLimit(_mtu, options) - NetPacket.GetHeaderSize(options == DeliveryMethod.Unreliable ? PacketProperty.Unreliable : PacketProperty.Channeled);
+
+        // Reliable packets stay a repair's overhead under the MTU so a repair can cover any of them.
+        private static int PacketSizeLimit(int mtu, DeliveryMethod deliveryMethod) =>
+            deliveryMethod == DeliveryMethod.ReliableOrdered || deliveryMethod == DeliveryMethod.ReliableUnordered
+                ? mtu - ReliableChannel.RepairOverhead
+                : mtu;
 
         /// <summary>
         /// Send data to peer with delivery event called
@@ -637,14 +651,15 @@ namespace LiteNetLib
             int headerSize = NetPacket.GetHeaderSize(property);
             //Save mtu for multithread
             int mtu = _mtu;
+            int maxPacketSize = PacketSizeLimit(mtu, deliveryMethod);
             int length = data.Length;
-            if (length + headerSize > mtu)
+            if (length + headerSize > maxPacketSize)
             {
                 //if cannot be fragmented
                 if (deliveryMethod != DeliveryMethod.ReliableOrdered && deliveryMethod != DeliveryMethod.ReliableUnordered)
                     throw new TooBigPacketException("Unreliable or ReliableSequenced packet size exceeded maximum of " + (mtu - headerSize) + " bytes, Check allowed size by GetMaxSinglePacketSize()");
 
-                int packetFullSize = mtu - headerSize;
+                int packetFullSize = maxPacketSize - headerSize;
                 int packetDataSize = packetFullSize - NetConstants.FragmentHeaderSize;
                 int totalPackets = length / packetDataSize + (length % packetDataSize == 0 ? 0 : 1);
 
@@ -1149,6 +1164,7 @@ namespace LiteNetLib
                 case PacketProperty.Ack:
                 case PacketProperty.Channeled:
                 case PacketProperty.ReliableMerged:
+                case PacketProperty.Repair:
                     ProcessChanneled(packet);
                     break;
 
@@ -1193,6 +1209,9 @@ namespace LiteNetLib
             _mergePos = 0;
             _mergeCount = 0;
         }
+
+        // Sends what is merged so far, so the next packet starts a datagram of its own.
+        internal void FlushMerged() => SendMerged();
 
         internal void SendUserData(NetPacket packet)
         {

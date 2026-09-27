@@ -36,6 +36,9 @@ public class UdpServerV2 : IUdpServer, INetLogger
             PingInterval = 900,
             UnsyncedEvents = true,
             DisconnectTimeout = 20000,
+            // Rebuild lost reliable packets for clients that offer repairs when connecting. Older
+            // clients do not offer them and keep the stock wire format.
+            ReliableRepairs = true,
             // Act as a NAT introduction mediator for peers that opt in.
             NatPunchEnabled = true
         };
