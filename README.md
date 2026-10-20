@@ -10,6 +10,13 @@ Delayed player-count or unregister requests from a previous instance cannot chan
 the replacement's route. These IDs do not change public room names or the client
 protocol.
 
+A client that joins a room while it has no host, for example after the host's
+connection dropped, is held without being authenticated until a host joins. A room
+whose only members are such waiting clients counts as empty: creating it again
+disconnects them, and it expires like any empty room. A host that reconnects with
+its host secret replaces its previous connection if the relay still has it; the
+clients of that old connection are disconnected so they can join again.
+
 Deploy the updated **PurrBalancer before PurrLay**; both updates are required for
 the complete fix. For updated relays, `EMPTY_ROOM_TIMEOUT_SECONDS` (default: 300)
 is enforced by PurrLay, which checks every 30 seconds and unregisters the matching

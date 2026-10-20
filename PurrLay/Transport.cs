@@ -13,6 +13,7 @@ public static partial class Transport
     static readonly Dictionary<PlayerInfo, ulong> _clientToRoom = new();
     static readonly Dictionary<ulong, List<PlayerInfo>> _roomToClients = new();
     static readonly Dictionary<ulong, PlayerInfo> _roomToHost = new();
+    static readonly HashSet<PlayerInfo> _awaitingHost = new();
     static readonly Dictionary<int, bool> _connToUDP = new();
     // connIds of peers that authenticated with `nat = true` (support NAT hole-punching).
     static readonly HashSet<int> _natCapable = new();
@@ -42,6 +43,34 @@ public static partial class Transport
     internal static int GetTransportConnectionCount()
     {
         lock (_transportLock) return _connToUDP.Count;
+    }
+
+    internal static bool HasAdmittedPlayers(ulong roomId)
+    {
+        lock (_transportLock)
+            return _roomToClients.TryGetValue(roomId, out var list) && list.Any(player => !_awaitingHost.Contains(player));
+    }
+
+    internal static List<PlayerInfo> RemoveClientsAwaitingHost(ulong roomId)
+    {
+        var removed = new List<PlayerInfo>();
+        lock (_transportLock)
+        {
+            if (!_roomToClients.TryGetValue(roomId, out var list))
+                return removed;
+
+            for (var i = list.Count - 1; i >= 0; i--)
+            {
+                var client = list[i];
+                if (!_awaitingHost.Remove(client))
+                    continue;
+
+                list.RemoveAt(i);
+                _clientToRoom.Remove(client);
+                removed.Add(client);
+            }
+        }
+        return removed;
     }
 
     internal static void RemoveEmptyRoomState(ulong roomId)
@@ -101,7 +130,7 @@ public static partial class Transport
         foreach (var client in directClients) KickPlayer(client);
     }
 
-    static void KickPlayer(PlayerInfo player)
+    internal static void KickPlayer(PlayerInfo player)
     {
         if (player.isUdp)
             HTTPRestAPI.GetUdpServerForConnection(player.connId)?.KickClient(player.connId);
@@ -335,6 +364,7 @@ public static partial class Transport
         lock (_transportLock)
         {
             bool hadRoom = _clientToRoom.Remove(conn, out roomId);
+            _awaitingHost.Remove(conn);
             RemoveWebRtcP2PPeer(conn);
             if (!hadRoom)
                 return;
@@ -425,11 +455,15 @@ public static partial class Transport
                 return;
             }
 
+            ReleaseHostReconnectingWith(player, auth);
+
             Room? room;
             bool isHost = false;
             List<PlayerInfo>? existingClients = null;
+            List<PlayerInfo>? waitingClients = null;
             bool hadExistingClients = false;
             bool awaitingWebRtcP2P = false;
+            bool awaitingHost = false;
 
             lock (_transportLock)
             {
@@ -464,6 +498,9 @@ public static partial class Transport
                 if (auth.webRtcP2P && player.isUdp && HTTPRestAPI.SupportsWebRtcP2P(player.connId))
                     _webRtcP2PPeers.Add(player.connId, new WebRtcP2PPeer());
 
+                if (!isHost && !_roomToHost.ContainsKey(room.roomId))
+                    awaitingHost = _awaitingHost.Add(player);
+
                 if (!_roomToClients.TryGetValue(room.roomId, out var list))
                 {
                     _roomToClients.Add(room.roomId, [player]);
@@ -473,15 +510,20 @@ public static partial class Transport
                 {
                     hadExistingClients = true;
                     if (isHost)
-                        existingClients = new List<PlayerInfo>(list);
+                    {
+                        existingClients = new List<PlayerInfo>();
+                        waitingClients = new List<PlayerInfo>();
+                        foreach (var client in list)
+                            (_awaitingHost.Remove(client) ? waitingClients : existingClients).Add(client);
+                    }
                     list.Add(player);
                     Lobby.UpdateRoomPlayerCount(room.roomId, list.Count);
                 }
 
-                if (!isHost) awaitingWebRtcP2P = TryStartWebRtcP2P(room.roomId, player);
+                if (!isHost && !awaitingHost) awaitingWebRtcP2P = TryStartWebRtcP2P(room.roomId, player);
             }
 
-            if (awaitingWebRtcP2P) return;
+            if (awaitingWebRtcP2P || awaitingHost) return;
 
             // A client just joined — if both it and the host support NAT punch, introduce them
             // so they can attempt a direct P2P link.
@@ -493,13 +535,8 @@ public static partial class Transport
             //    "connected" its relay receive path treats every packet as unframed game data.
             // Both are reliable-ordered, so send-order == receive-order.
             //
-            // Limitation: only the joining client is introduced, and only to a host that
-            // is already present. A client that authenticates before the host has no
-            // partner yet, and it cannot be introduced retroactively — once it receives
-            // SERVER_AUTHENTICATED its receive path treats every packet as unframed game
-            // data, so a later SERVER_NAT_INTRODUCE can't reach it. Such a client stays
-            // relay-only for the whole session. Hosts normally authenticate first, so this
-            // is an edge case; closing it would require a client-side protocol change.
+            // A client that authenticates before the host is held without
+            // SERVER_AUTHENTICATED and goes through this same sequence once the host arrives.
             if (!isHost)
                 TryStartNatIntroduce(room.roomId, player);
 
@@ -524,6 +561,12 @@ public static partial class Transport
                         _webRtcP2PPeers.TryGetValue(player.connId, out var peer))
                         peer.HostReady = true;
                 }
+
+                if (waitingClients != null)
+                {
+                    foreach (var client in waitingClients)
+                        AdmitWaitingClient(room.roomId, client);
+                }
             }
             else SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATED);
         }
@@ -531,6 +574,59 @@ public static partial class Transport
         {
             SendSingleCode(player, SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED);
             Console.Error.WriteLine($"Authentication failed (exception): {e.Message}\n{e.StackTrace}");
+        }
+    }
+
+    /// <summary>
+    /// A host secret arriving while the room already has a host means that host reconnected and its
+    /// old link has not timed out yet. Drop the old link and its clients, as if the host had left.
+    /// </summary>
+    static void ReleaseHostReconnectingWith(PlayerInfo player, ClientAuthenticate auth)
+    {
+        PlayerInfo staleHost;
+        List<PlayerInfo>? clients;
+
+        lock (_transportLock)
+        {
+            if (RelayDeployment.Retired || !_connToUDP.ContainsKey(player.connId) ||
+                string.IsNullOrWhiteSpace(auth.roomName) || string.IsNullOrWhiteSpace(auth.clientSecret) ||
+                !Lobby.TryGetRoom(auth.roomName, out var room) || room == null || room.hostSecret != auth.clientSecret ||
+                !_roomToHost.Remove(room.roomId, out staleHost))
+                return;
+
+            _clientToRoom.Remove(staleHost);
+            if (_roomToClients.Remove(room.roomId, out clients))
+            {
+                clients.Remove(staleHost);
+                foreach (var client in clients)
+                {
+                    _clientToRoom.Remove(client);
+                    _awaitingHost.Remove(client);
+                }
+            }
+
+            Lobby.UpdateRoomPlayerCount(room.roomId, 0);
+        }
+
+        KickPlayer(staleHost);
+        if (clients != null)
+        {
+            foreach (var client in clients)
+                KickPlayer(client);
+        }
+    }
+
+    static void AdmitWaitingClient(ulong roomId, PlayerInfo client)
+    {
+        lock (_transportLock)
+        {
+            if (!_clientToRoom.TryGetValue(client, out var clientRoom) || clientRoom != roomId ||
+                TryStartWebRtcP2P(roomId, client))
+                return;
+
+            TryStartNatIntroduce(roomId, client);
+            SendClientsConnected(roomId, client);
+            SendSingleCode(client, SERVER_PACKET_TYPE.SERVER_AUTHENTICATED);
         }
     }
 

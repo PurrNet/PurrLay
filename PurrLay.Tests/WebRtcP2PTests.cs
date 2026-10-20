@@ -118,7 +118,7 @@ public sealed class WebRtcP2PTests
     }
 
     [Fact]
-    public async Task NativeNatTakesPriorityAndLateHostNeverIntroducesAuthenticatedClient()
+    public async Task NativeNatTakesPriorityAndClientWaitingForTheHostIsIntroducedWhenItArrives()
     {
         await using (var test = await Harness.StartAsync())
         {
@@ -129,9 +129,11 @@ public sealed class WebRtcP2PTests
         }
         await using (var test = await Harness.StartAsync())
         {
-            test.Room.Authenticate(test.Room.CurrentRoom().clientSecret!, backend: 3, webRtcP2P: true);
-            test.Room.Authenticate(test.HostSecret, backend: 3, webRtcP2P: true);
-            Assert.DoesNotContain(test.Udp.Packets, packet => packet.Data[0] == 7);
+            var early = test.Room.Authenticate(test.Room.CurrentRoom().clientSecret!, backend: 3, webRtcP2P: true,
+                awaitingHost: true);
+            var host = test.Room.Authenticate(test.HostSecret, backend: 3, webRtcP2P: true);
+            Assert.Equal(new byte[] { 7 }, test.PacketsFor(early).Select(packet => packet[0]));
+            Assert.Equal(new byte[] { 3, 7 }, test.PacketsFor(host).Select(packet => packet[0]));
         }
     }
 

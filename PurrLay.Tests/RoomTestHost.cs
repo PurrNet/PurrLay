@@ -94,7 +94,7 @@ internal sealed class RoomTestHost : IAsyncDisposable
                 _requests.Add(HandleAsync(context));
             }
         }
-        catch (HttpListenerException) when (!_listener.IsListening) { }
+        catch (HttpListenerException e) when (!_listener.IsListening || e.ErrorCode == 995) { }
         catch (ObjectDisposedException) { }
     }
 
@@ -197,7 +197,7 @@ internal sealed class RoomTestHost : IAsyncDisposable
     }
 
     public PlayerInfo Authenticate(string secret, bool success = true, int backend = 1, bool nat = false,
-        bool webRtcP2P = false, bool awaitingWebRtcP2P = false)
+        bool webRtcP2P = false, bool awaitingWebRtcP2P = false, bool awaitingHost = false)
     {
         var player = new PlayerInfo(HTTPRestAPI.CreateCallbacks(backend).ReserveConnId(true), true);
         _players.Add(player);
@@ -209,9 +209,15 @@ internal sealed class RoomTestHost : IAsyncDisposable
             ["webRtcP2P"] = webRtcP2P
         }.ToString());
         Transport.OnServerReceivedData(player, data);
+        var recorder = Assert.IsType<RecordingUdpServer>(HTTPRestAPI.GetUdpServerForConnection(player.connId));
+        if (awaitingHost)
+        {
+            Assert.DoesNotContain(recorder.Packets, packet => packet.Connection == player.connId);
+            return player;
+        }
+
         var expected = awaitingWebRtcP2P ? SERVER_PACKET_TYPE.SERVER_WEBRTC_P2P :
             success ? SERVER_PACKET_TYPE.SERVER_AUTHENTICATED : SERVER_PACKET_TYPE.SERVER_AUTHENTICATION_FAILED;
-        var recorder = Assert.IsType<RecordingUdpServer>(HTTPRestAPI.GetUdpServerForConnection(player.connId));
         Assert.Contains(recorder.Packets, packet => packet.Connection == player.connId && packet.Data[0] == (byte)expected);
         return player;
     }

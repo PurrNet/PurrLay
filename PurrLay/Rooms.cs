@@ -86,6 +86,7 @@ public static class Lobby
     public static async Task<string> CreateRoom(string region, string name)
     {
         Room room;
+        List<PlayerInfo>? evicted = null;
         lock (_roomLock)
         {
             if (RelayDeployment.Draining) throw new RelayDrainingException();
@@ -94,7 +95,7 @@ public static class Lobby
                 if (existing.registrationInProgress)
                     throw new Exception("Room creation already in progress");
 
-                if (Transport.TryGetRoomPlayerCount(existing.roomId, out var currentCount) && currentCount > 0)
+                if (Transport.HasAdmittedPlayers(existing.roomId))
                     throw new Exception("Room already exists");
             }
 
@@ -116,6 +117,7 @@ public static class Lobby
                 };
                 if (existing != null)
                 {
+                    evicted = Transport.RemoveClientsAwaitingHost(existing.roomId);
                     Transport.RemoveEmptyRoomState(existing.roomId);
                     _roomIdToName.Remove(existing.roomId);
                 }
@@ -123,6 +125,12 @@ public static class Lobby
                 _roomIdToName.Add(room.roomId, name);
             }
             room.registrationInProgress = true;
+        }
+
+        if (evicted != null)
+        {
+            foreach (var client in evicted)
+                Transport.KickPlayer(client);
         }
 
         try
@@ -229,7 +237,7 @@ public static class Lobby
                 {
                     room.emptySince ??= DateTime.UtcNow;
                 }
-                else
+                else if (Transport.HasAdmittedPlayers(roomId))
                 {
                     room.emptySince = null; // Room has players, clear empty timestamp
                 }
@@ -280,19 +288,25 @@ public static class Lobby
 
     internal static int CleanupEmptyRooms(DateTime now, TimeSpan timeout)
     {
+        var evicted = new List<PlayerInfo>();
+        Room[] expired;
         lock (_roomLock)
         {
-            var expired = _room.Values.Where(room => !room.registrationInProgress && !room.removalInProgress &&
+            expired = _room.Values.Where(room => !room.registrationInProgress && !room.removalInProgress &&
                 (room.removed || room.emptySince.HasValue && now - room.emptySince.Value >= timeout) &&
-                !Transport.TryGetRoomPlayerCount(room.roomId, out _)).ToArray();
+                !Transport.HasAdmittedPlayers(room.roomId)).ToArray();
 
             foreach (var room in expired)
             {
                 Console.WriteLine($"Removing empty room {room.name} (ID: {room.roomId})");
+                evicted.AddRange(Transport.RemoveClientsAwaitingHost(room.roomId));
                 RemoveRoom(room.roomId);
             }
-            return expired.Length;
         }
+
+        foreach (var client in evicted)
+            Transport.KickPlayer(client);
+        return expired.Length;
     }
 
     public static async Task StartEmptyRoomCleanupTask()
