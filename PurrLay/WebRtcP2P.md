@@ -19,7 +19,8 @@ Authentication JSON adds `"webRtcP2P": true`. The relay starts an attempt only
 between the current room host and a newly joining client, with a fresh opaque
 token. Both peers receive an introduction before the host receives
 `SERVER_CLIENT_CONNECTED` and before the client receives `SERVER_AUTHENTICATED`.
-A client that was already authenticated when the host arrived stays relay-only.
+A client that joins before the host is held without `SERVER_AUTHENTICATED` and
+gets the same introduction once the host arrives.
 
 Each peer reports `ready` only after all four direct data channels are open. The
 relay commits direct routing only after both reports arrive. A failure, exhausted
