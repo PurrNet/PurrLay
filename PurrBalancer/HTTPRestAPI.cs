@@ -297,6 +297,8 @@ public static partial class HTTPRestAPI
                 return await ClaimMigration(req);
             case "/migration/current":
                 return await GetMigrationCurrent(req);
+            case "/migration/authorize":
+                return await ForwardMigrationRequest(req, "/migration/authorize", true);
             case "/list":
                 return await SearchRooms(req);
             case "/getTotalConnections":
@@ -357,6 +359,11 @@ public static partial class HTTPRestAPI
         {
             var content = await response.Content.ReadAsByteArrayAsync();
             var contentStr = Encoding.UTF8.GetString(content);
+
+            // A refusal the caller can act on (a "code" such as host_connected) keeps its status and body.
+            if (TryParseRelayError(contentStr, out var relayError))
+                return new ApiResponse(relayError, response.StatusCode);
+
             throw new Exception(contentStr);
         }
 
@@ -370,6 +377,26 @@ public static partial class HTTPRestAPI
         catch (Exception e)
         {
             throw new Exception("Invalid response " + e.Message + "\n" + e.StackTrace);
+        }
+    }
+
+    private static bool TryParseRelayError(string body, out JObject error)
+    {
+        error = null!;
+        if (string.IsNullOrWhiteSpace(body) || !body.TrimStart().StartsWith("{"))
+            return false;
+
+        try
+        {
+            var parsed = JObject.Parse(body);
+            if (parsed["code"] == null || parsed["error"] == null)
+                return false;
+            error = parsed;
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 

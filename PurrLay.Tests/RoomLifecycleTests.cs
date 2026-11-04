@@ -229,7 +229,10 @@ public sealed class RoomLifecycleTests
         host.Authenticate(originalClientSecret);
         await host.WaitForCountAsync(2);
 
-        var migration = Lobby.ClaimMigration(host.Name, originalClientSecret, "promoted-player", 0);
+        // A handoff: the connected host authorizes the player that takes over.
+        var (authorization, generation) = Lobby.AuthorizeMigration(host.Name, originalSecret, "promoted-player");
+        Assert.Equal(0, generation);
+        var migration = Lobby.ClaimMigration(host.Name, authorization, "promoted-player", 0);
         Assert.Equal(original.roomId, migration.roomId);
         Assert.Equal(1, migration.generation);
         Assert.NotNull(migration.fencingToken);
@@ -242,7 +245,7 @@ public sealed class RoomLifecycleTests
         host.Authenticate(migration.hostSecret!);
         Transport.OnClientLeft(oldHost);
         await host.WaitForCountAsync(2);
-        Assert.Throws<Exception>(() => Lobby.ClaimMigration(host.Name, migration.clientSecret!, "another-player", 0));
+        Assert.ThrowsAny<Exception>(() => Lobby.ClaimMigration(host.Name, migration.clientSecret!, "another-player", 0));
         Assert.Equal(migration.clientSecret, (string?)(await host.JoinAsync())["secret"]);
     }
 }

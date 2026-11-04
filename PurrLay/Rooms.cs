@@ -15,6 +15,11 @@ public class Room
     public string? migrationFencingToken;
     public string? migrationPromotedPlayerId;
     public DateTime? migrationClaimedAt;
+    // One-use token the host hands to the player it nominates, so that player can claim while the host is
+    // still connected (a graceful handoff).
+    internal string? migrationAuthorizationToken;
+    internal string? migrationAuthorizedPlayerId;
+    internal DateTime migrationAuthorizationExpires;
     internal string instanceId = Guid.NewGuid().ToString("N");
     internal string? previousInstanceId;
     internal bool registered;
@@ -48,8 +53,19 @@ public readonly struct MigrationRoomSnapshot
     }
 }
 
+/// <summary>A migration claim the relay refuses for a reason the caller can act on.</summary>
+public sealed class MigrationClaimRejectedException(string code, string message, int generation) : Exception(message)
+{
+    public string Code { get; } = code;
+
+    /// <summary>The room's migration generation when the request was refused.</summary>
+    public int Generation { get; } = generation;
+}
+
 public static class Lobby
 {
+    internal static readonly TimeSpan MigrationAuthorizationLifetime = TimeSpan.FromSeconds(60);
+
     static readonly Dictionary<string, Room> _room = new();
     static readonly Dictionary<ulong, string> _roomIdToName = new();
     internal static readonly object SyncRoot = new();
@@ -168,13 +184,32 @@ public static class Lobby
             if (!_room.TryGetValue(name, out var room) || !room.registered)
                 throw new Exception("Room not found");
 
-            if (!string.Equals(room.clientSecret, claimSecret) && !string.Equals(room.hostSecret, claimSecret))
-                throw new Exception("Invalid migration secret");
+            var now = DateTime.UtcNow;
+            bool byHost = string.Equals(room.hostSecret, claimSecret);
+            bool byAuthorization = room.migrationAuthorizationToken != null &&
+                                   string.Equals(room.migrationAuthorizationToken, claimSecret) &&
+                                   now < room.migrationAuthorizationExpires &&
+                                   (room.migrationAuthorizedPlayerId == null ||
+                                    string.Equals(room.migrationAuthorizedPlayerId, promotedPlayerId));
+            bool byClient = string.Equals(room.clientSecret, claimSecret);
+
+            if (!byHost && !byAuthorization && !byClient)
+                throw new MigrationClaimRejectedException("invalid_secret",
+                    "Invalid migration secret: not a secret of this room, or an authorization that was used, expired or issued for another player",
+                    room.migrationGeneration);
+
+            // The client secret is handed to anyone who joins, so on its own it only claims a room whose host is
+            // gone. Taking over from a connected host needs the host secret or an authorization from the host.
+            if (!byHost && !byAuthorization && Transport.HasRoomHost(room.roomId))
+                throw new MigrationClaimRejectedException("host_connected",
+                    "The host of this room is still connected. A handoff needs an authorization from the host (/migration/authorize).",
+                    room.migrationGeneration);
 
             if (expectedGeneration.HasValue && room.migrationGeneration != expectedGeneration.Value)
-                throw new Exception($"Migration generation mismatch. Expected {expectedGeneration.Value}, current {room.migrationGeneration}");
+                throw new MigrationClaimRejectedException("generation_mismatch",
+                    $"Migration generation mismatch. Expected {expectedGeneration.Value}, current {room.migrationGeneration}",
+                    room.migrationGeneration);
 
-            var now = DateTime.UtcNow;
             room.hostSecret = NewSecret();
             room.clientSecret = NewSecret();
             room.createdAt = now;
@@ -183,6 +218,8 @@ public static class Lobby
             room.migrationFencingToken = NewSecret();
             room.migrationPromotedPlayerId = promotedPlayerId;
             room.migrationClaimedAt = now;
+            room.migrationAuthorizationToken = null;
+            room.migrationAuthorizedPlayerId = null;
 
             roomId = room.roomId;
             snapshot = new MigrationRoomSnapshot(room);
@@ -194,6 +231,29 @@ public static class Lobby
         }
 
         return snapshot;
+    }
+
+    /// <summary>
+    /// The host of the room authorizes a handoff: the returned token lets <paramref name="promotedPlayerId"/> (any
+    /// player when null) claim the room once, within <see cref="MigrationAuthorizationLifetime"/>, while the host is
+    /// still connected. A new authorization replaces the previous one.
+    /// </summary>
+    public static (string token, int generation) AuthorizeMigration(string name, string hostSecret, string? promotedPlayerId)
+    {
+        lock (_roomLock)
+        {
+            if (!_room.TryGetValue(name, out var room) || !room.registered)
+                throw new Exception("Room not found");
+
+            if (string.IsNullOrEmpty(hostSecret) || !string.Equals(room.hostSecret, hostSecret))
+                throw new MigrationClaimRejectedException("invalid_host_secret", "Invalid host secret", room.migrationGeneration);
+
+            var token = NewSecret();
+            room.migrationAuthorizationToken = token;
+            room.migrationAuthorizedPlayerId = string.IsNullOrWhiteSpace(promotedPlayerId) ? null : promotedPlayerId;
+            room.migrationAuthorizationExpires = DateTime.UtcNow + MigrationAuthorizationLifetime;
+            return (token, room.migrationGeneration);
+        }
     }
 
     public static bool TryGetRoom(string name, out Room? room)

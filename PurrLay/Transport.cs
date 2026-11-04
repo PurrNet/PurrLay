@@ -95,6 +95,12 @@ public static partial class Transport
         }
     }
 
+    public static bool HasRoomHost(ulong roomId)
+    {
+        lock (_transportLock)
+            return _roomToHost.ContainsKey(roomId);
+    }
+
     public static void ReleaseRoomHostForMigration(ulong roomId)
     {
         PlayerInfo host;

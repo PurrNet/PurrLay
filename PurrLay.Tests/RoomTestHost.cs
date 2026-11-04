@@ -125,7 +125,8 @@ internal sealed class RoomTestHost : IAsyncDisposable
             }
 
             byte[] data;
-            if (req.Url.RawWithoutQuery == "/getJoinDetails")
+            // Paths the balancer forwards to the relay; everything else is a call to the balancer.
+            if (req.Url.RawWithoutQuery is "/getJoinDetails" or "/migration/claim" or "/migration/current" or "/migration/authorize")
             {
                 var response = await HTTPRestAPI.OnRequest(req);
                 data = response.data;

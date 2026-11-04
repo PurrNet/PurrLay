@@ -163,6 +163,9 @@ public static class HTTPRestAPI
         public int udpPort;
         public int udpPortV2;
         [JsonProperty(NullValueHandling = NullValueHandling.Ignore)] public string? webRtcUrl;
+        // Added for host migration; older clients ignore it. Clients pass it back as expected_generation when they
+        // claim, so a claim fails if someone else claimed first.
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)] public int? migrationGeneration;
     }
 
     [Serializable]
@@ -209,6 +212,7 @@ public static class HTTPRestAPI
             case "/allocate_ws": return await AllocateWebSockets(req);
             case "/migration/claim": return ClaimMigration(req);
             case "/migration/current": return GetMigrationCurrent(req);
+            case "/migration/authorize": return AuthorizeMigration(req);
             case "/getTotalConnections": return GetTotalConnections(req);
             default:
                 return new ApiResponse(HttpStatusCode.NotFound);
@@ -242,8 +246,69 @@ public static class HTTPRestAPI
         if (webServer == null || udpServerV1 == null)
             throw new Exception("No rooms available");
 
-        var snapshot = Lobby.ClaimMigration(name, claimSecret, promotedPlayerId, expectedGeneration);
+        MigrationRoomSnapshot snapshot;
+        try
+        {
+            snapshot = Lobby.ClaimMigration(name, claimSecret, promotedPlayerId, expectedGeneration);
+        }
+        catch (MigrationClaimRejectedException rejected)
+        {
+            return MigrationRefusal(rejected);
+        }
+
         return new ApiResponse(JObject.FromObject(ToMigrationJoinInfo(snapshot, snapshot.hostSecret)));
+    }
+
+    // 403 for a secret that does not prove anything, 409 for a valid request that lost to the room's state.
+    private static ApiResponse MigrationRefusal(MigrationClaimRejectedException rejected)
+    {
+        var status = rejected.Code is "invalid_secret" or "invalid_host_secret"
+            ? HttpStatusCode.Forbidden
+            : HttpStatusCode.Conflict;
+        return new ApiResponse(new JObject
+        {
+            ["error"] = rejected.Message,
+            ["code"] = rejected.Code,
+            ["generation"] = rejected.Generation
+        }, status);
+    }
+
+    private static ApiResponse AuthorizeMigration(HttpRequestBase req)
+    {
+        var name = req.RetrieveHeaderValue("name");
+        var internalSec = req.RetrieveHeaderValue("internal_key_secret");
+        var hostSecret = req.RetrieveHeaderValue("host_secret");
+        var promotedPlayerId = req.RetrieveHeaderValue("promoted_player_id") ??
+                               req.RetrieveHeaderValue("promoted_player");
+
+        if (string.IsNullOrWhiteSpace(name))
+            throw new Exception("Missing name");
+
+        if (string.IsNullOrWhiteSpace(internalSec))
+            throw new Exception("Bad internal secret, -1");
+
+        if (!string.Equals(internalSec, Program.SECRET_INTERNAL))
+            throw new Exception($"Bad internal secret, {internalSec.Length}");
+
+        if (string.IsNullOrWhiteSpace(hostSecret))
+            throw new Exception("Missing host secret");
+
+        string token;
+        int generation;
+        try
+        {
+            (token, generation) = Lobby.AuthorizeMigration(name, hostSecret, promotedPlayerId);
+        }
+        catch (MigrationClaimRejectedException rejected)
+        {
+            return MigrationRefusal(rejected);
+        }
+        return new ApiResponse(new JObject
+        {
+            ["authorization"] = token,
+            ["generation"] = generation,
+            ["expiresInSeconds"] = (int)Lobby.MigrationAuthorizationLifetime.TotalSeconds
+        });
     }
 
     private static ApiResponse GetMigrationCurrent(HttpRequestBase req)
@@ -284,6 +349,7 @@ public static class HTTPRestAPI
         try { secret = await Lobby.CreateRoom(region, name); }
         catch (RelayDrainingException exception)
         { return ApiResponse.FromError(exception.Message, HttpStatusCode.ServiceUnavailable); }
+        int? generation = Lobby.TryGetMigrationState(name, out var allocated) ? allocated.generation : null;
 
         webServer ??= new WebSockets(Program.WEBSOCKETS_PORT);
         udpServerV1 ??= UdpServerFactory.CreateV1(Program.UDP_PORT, CreateCallbacks(1));
@@ -298,7 +364,8 @@ public static class HTTPRestAPI
             secret = secret,
             udpPort = Program.UDP_PORT,
             udpPortV2 = Program.UDP_PORT_V2,
-            webRtcUrl = webRtcRuntime?.PublicUrl
+            webRtcUrl = webRtcRuntime?.PublicUrl,
+            migrationGeneration = generation
         }));
     }
 
@@ -324,7 +391,8 @@ public static class HTTPRestAPI
             secret = room.clientSecret,
             udpPort = Program.UDP_PORT,
             udpPortV2 = Program.UDP_PORT_V2,
-            webRtcUrl = webRtcRuntime?.PublicUrl
+            webRtcUrl = webRtcRuntime?.PublicUrl,
+            migrationGeneration = room.migrationGeneration
         }));
     }
 

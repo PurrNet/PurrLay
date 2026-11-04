@@ -120,7 +120,7 @@ public static partial class HTTPRestAPI
         lock (_roomsLock)
             localRoom = name != null && _roomToServerEndpoint.ContainsKey(name);
 
-        if (path is "/join" or "/migration/current" or "/migration/claim")
+        if (path is "/join" or "/migration/current" or "/migration/claim" or "/migration/authorize")
         {
             if (localRoom) return null;
             foreach (var dependency in dependencies)
