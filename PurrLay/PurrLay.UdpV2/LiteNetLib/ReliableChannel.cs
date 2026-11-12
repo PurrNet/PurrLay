@@ -115,7 +115,7 @@ namespace LiteNetLib
         public ReliableChannel(LiteNetPeer peer, bool ordered, byte id) : base(peer)
         {
             _id = id;
-            _windowSize = NetConstants.DefaultWindowSize;
+            _windowSize = peer.UsesLargeWindow ? NetConstants.DefaultWindowSize : NetConstants.StockWindowSize;
             _ordered = ordered;
             _pendingPackets = new PendingPacket[_windowSize];
             for (int i = 0; i < _pendingPackets.Length; i++)
@@ -723,6 +723,7 @@ namespace LiteNetLib
                 int idx = seq % _windowSize;
                 var packet = _pendingPackets[idx].Packet;
                 if (packet == null || !_pendingPackets[idx].IsSent || packet.Size > maxPacketSize ||
+                    NetUtils.RelativeSequenceNumber(_localSeqence, seq) > 64 ||
                     RepairSizeClass(packet.Size) != sizeClass || currentTime - _pendingPackets[idx].TimeStamp > horizon ||
                     currentTime - _pendingPackets[idx].TimeStamp < RepairSpacingTicks)
                     continue;
