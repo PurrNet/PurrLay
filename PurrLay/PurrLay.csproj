@@ -13,6 +13,7 @@
         <InternalsVisibleTo Include="PurrLay.Tests" />
         <PackageReference Include="JetBrains.Annotations" Version="2025.2.0" />
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+        <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.20.1" />
         <PackageReference Include="Watson" Version="6.3.12" />
     </ItemGroup>
 
