@@ -31,7 +31,7 @@ namespace JamesFrowen.SimpleWeb
         {
             config = sslConfig;
             if (config.enabled)
-                certificate = new X509Certificate2(config.certPath, config.certPassword);
+                certificate = X509CertificateLoader.LoadPkcs12FromFile(config.certPath, config.certPassword);
         }
 
         internal bool TryCreateStream(Connection conn)

@@ -85,7 +85,7 @@ The gateway is a local Go/Pion process supervised by PurrLay. It uses a single
 shared UDP port for ICE rather than allocating a public port per player.
 
 Build the gateway in `PurrLay/PurrLay.WebRtcGateway` with
-`go build -o ../bin/Debug/net8.0/PurrLay.WebRtcGateway .` (add `.exe` on Windows),
+`go build -o ../bin/Debug/net10.0/PurrLay.WebRtcGateway .` (add `.exe` on Windows),
 or set `WEBRTC_GATEWAY_PATH` to its absolute executable path. The Docker build
 includes the executable and enables it by default. Local .NET runs require
 `WEBRTC_ENABLED=true`. No gateway binary or `WEBRTC_ENABLED=false` leaves the

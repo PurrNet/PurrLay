@@ -36,7 +36,7 @@ jobs:
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'
       - name: Test session preservation and handoff recovery
         run: dotnet test PurrLay.Tests/PurrLay.Tests.csproj --configuration Release --nologo
       - name: Test deployment safeguards
