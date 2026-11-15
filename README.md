@@ -114,6 +114,31 @@ ports; `PurrLay/fly.toml` retains UDP `7779` for manual deployments. No addition
 manual per-region settings are required. Push these changes before running the
 workflow, and rebuild browser games with the updated PurrTransport to use WebRTC.
 
+## Optional metrics
+
+PurrLay reports a few numbers through .NET's `System.Diagnostics.Metrics` under the meter `PurrLay`, so tools such as
+`dotnet-counters` can read them. With `OTEL_EXPORTER_OTLP_ENDPOINT` set, it also sends them over OTLP, for example to
+Prometheus or an OpenTelemetry Collector. Without it nothing is sent.
+
+| Metric | Unit | Meaning |
+| --- | --- | --- |
+| `purrlay.room.count` | `{room}` | Open rooms |
+| `purrlay.player.count` | `{player}` | Players in rooms, hosts included |
+| `purrlay.connection.count` | `{connection}` | Open connections |
+| `purrlay.player.joins` | `{join}` | Room joins, hosts included |
+| `purrlay.received` | `By` | Bytes received from players |
+| `purrlay.relayed` | `By` | Bytes handed on to other players and hosts |
+
+The standard OpenTelemetry environment variables apply; they must be real environment variables, not `.env` entries.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Unset | Turns sending on. With `http/protobuf`, `/v1/metrics` is added to it, e.g. `http://prometheus:9090/api/v1/otlp` for Prometheus. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | `http/protobuf` for Prometheus. |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | Milliseconds between sends. |
+| `OTEL_SERVICE_NAME` | `purrlay` | Service name. |
+| `OTEL_RESOURCE_ATTRIBUTES` | Unset | E.g. `service.instance.id=eu-1`, so a relay keeps one name across restarts. |
+
 For manual Fly deployments, assign the app a **dedicated public IPv4**, set
 `WEBRTC_PUBLIC_IP` to that address, and expose UDP `7779` as shown in
 `PurrLay/fly.toml`. A shared HTTP IPv4

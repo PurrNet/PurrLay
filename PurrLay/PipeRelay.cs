@@ -76,6 +76,7 @@ public static class PipeRelay
             HTTPRestAPI.GetUdpServerForConnection(targetConnId)?.SendOne(targetConnId, segment, method);
         else
             HTTPRestAPI.webServer?.SendOne(targetConnId, segment);
+        RelayMetrics.Relayed(segment.Length);
     }
 
     static int ReadInt(byte[] data, int offset)

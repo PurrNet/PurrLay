@@ -180,6 +180,7 @@ internal static class Program
             if (Env.TryGetValue("SECRET", out var secret) && secret != null)
                 SECRET_INTERNAL = secret;
 
+            RelayMetrics.Start();
             RelayDeployment.Initialize(Env.TryGetValueOrDefault("RELAY_DEPLOYMENT_ID", ""),
                 bool.TryParse(Env.TryGetValueOrDefault("RELAY_START_STANDBY", "false"), out var standby) && standby);
             HTTPRestAPI.webServer = new WebSockets(WEBSOCKETS_PORT);
